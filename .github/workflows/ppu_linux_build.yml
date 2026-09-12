@@ -1,0 +1,66 @@
+# =============================================================================
+# PPU torch whl 编译门禁：v2.11.0 的 PR 级流水线（只读缓存）。
+#
+# 定位：
+#   - 触发：针对 v2.11.0 的 pull_request（外加 workflow_dispatch 便于临时手动出包）
+#   - 缓存：只 restore、不 save。读的是 ppu_refresh_cache.yml 在 v2.11.0 上种下的
+#     ccache 基线，命中后编译时间从冷编译的数小时降到增量水平
+#   - 产出：dist/torch-*.whl 上传为 artifact（ppu-wheel-<env>-<commit>，保留 14 天）
+#
+# 为什么这里不回写缓存：
+#   pull_request 触发的 run 写出的缓存归属 refs/pull/<N>/merge 作用域，只有同一个 PR
+#   的 re-run 能读到 —— base 分支和其它 PR 一条都读不到，却要实打实占掉仓库 10GiB
+#   配额，把真正有用的分支基线按 LRU 挤出去。所以写缓存这件事集中在手动触发的
+#   ppu_refresh_cache.yml 里做。
+#
+# 命中率掉下来了怎么办：
+#   在 v2.11.0 上手动跑一次 ppu_refresh_cache.yml 刷新基线即可，本文件无需改动。
+#
+# 编译逻辑不在本文件里：
+#   镜像、PPU SDK、ccache 配置、并行度 / OOM 防护、产物收集等全部在
+#   .github/workflows/_ppu_build.yml（可复用 workflow）中，与刷缓存流水线共用同一份
+#   实现。这是保证「两侧算出的 cache key 前缀与编译参数完全一致」的前提——两边各写一份
+#   steps 的话，任何一侧漏改都会静默退化成冷编译，日志上只表现为命中率 0。
+#   同理，镜像 / 目标架构也不在这里写（它们进 cache key 指纹），而是用
+#   _ppu_build.yml 的 input 默认值，改镜像只需改那一处。
+# =============================================================================
+name: ppu-linux-build
+
+on:
+  pull_request:
+    # 只守 v2.11.0：这是 base 分支过滤，也正好对应能读到的那份缓存作用域
+    branches:
+      - v2.11.0
+    # 只有可能影响编译产物的变更才触发：纯文档 / 无关脚本的 PR 不再空跑一次编译。
+    # 覆盖：C++/CUDA 源码、Python 源码、编译脚本，以及本文件与它调用的可复用 workflow
+    # （改这两者本身也要能触发验证）。命中缓存后是增量编译，未命中才是冷编译。
+    paths:
+      - 'aten/**'
+      - 'torch/**'
+      - 'c10/**'
+      - 'torchgen/**'
+      - 'setup.py'
+      - '.ci/ppu/**'
+      - '.github/workflows/ppu_linux_build.yml'
+      - '.github/workflows/_ppu_build.yml'
+  # 手动触发用于临时出包。注意它同样不回写缓存；且在 topic 分支上跑读不到 v2.11.0 的
+  # 缓存（兄弟分支作用域不可见），必然冷编译——要种缓存请用 ppu_refresh_cache.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/_ppu_build.yml
+    with:
+      # 镜像 / 环境标识 / 目标架构一律不传，用 _ppu_build.yml 的默认值，
+      # 保证与 ppu_refresh_cache.yml 算出同一个 cache key 前缀
+      #
+      # 只读缓存，原因见文件头
+      save-ccache: false
+      upload-wheel: true
