@@ -1,36 +1,44 @@
-# P0 smoke gate: PPU CUDA 冒烟测试，跑在自建 PPU 集群的单卡 pod 上。
+# PPU CUDA 分布式测试门禁（810E 板型）：跑在自建 PPU 集群的**单个 2 卡 pod** 上。
 #
-# 执行模型（与"直接在 runner 容器里跑测试"的早期版本不同）：
+# 本文件与 ppu_distribute_890.yml 互为镜像，只差三处：NODE_SELECTOR（板型）、
+# BUILD_WORKFLOW（等哪条编译流水线）、paths（盯自己那一套文件）。
+# 其余内容逐字相同 —— 改一侧必须同步另一侧（diff 两个文件即可确认没漂移）。
+#
+# 用例清单来自官方 CI 的两条分布式配置（见 .ci/ppu/distributed_test.sh 里的逐条注释）：
+#   - .ci/pytorch/test.sh 的 test_inductor_distributed()（对应 inductor-unittest.yml 的
+#     inductor_distributed 配置，官方跑在 4 卡 g5.12xlarge）；
+#   - .ci/pytorch/test.sh 的 test_h100_distributed()（对应 h100-distributed.yml）。
+# 按「PPU pod 只有 2 卡」和「真武 PPU 不支持 FP8」两条约束裁剪后落到本门禁。
+#
+# 执行模型（与 ppu_smoke_810.yml 完全一致，只是把 1 卡换成 2 卡）：
 #   - 本 job 只在 CPU runner 上做编排：checkout 源码后，由
 #     flytiger-eco/ppu-distributed-action 把源码打包暂存到 NAS，在带 PPU 卡的节点上
 #     拉起 pod，解压到 source_dir，再执行 command。
 #   - 所以 runner 容器只需小体积的 actions-runner 镜像；PPU 发布镜像只在 PPU pod 内
-#     使用，避免 CPU 节点拉大镜像超时（此前 "initialize container" 失败的原因）。
-#   - 冒烟用例只需单卡：nnodes: 0 + nproc_per_node: 1。
+#     使用，避免 CPU 节点拉大镜像超时。
+#   - 分布式用例需要 2 卡：nnodes: 0 + nproc_per_node: 2。注意 nproc_per_node 是
+#     **每 Pod 请求的 PPU 卡数**（不是进程数），nnodes: 0 是单 pod 模式，所以下面的
+#     command 只会被执行一次；测试进程由各用例自己按 world_size spawn。
+#     action 注入 pod 的 RANK / WORLD_SIZE / MASTER_ADDR 那一套对 PyTorch 单机多卡测试
+#     是污染，由 .ci/ppu/distributed_test.sh 在跑用例前 unset，原因见该脚本文件头。
 #
 # 被测的 torch 从哪来：
-#   - 等 ppu_linux_build.yml 把本 PR 的 whl 编完 → 下载它的 artifact → 随源码送进 pod →
+#   - 等 ppu_linux_build_810.yml 把本 PR 的 whl 编完 → 下载它的 artifact → 随源码送进 pod →
 #     在 pod 内 pip install 成功后才跑用例。门禁因此测的是本 PR 真正编出来的 torch。
-#   - 「等」是轮询 ppu-linux-build 在同一个 head sha 上的 run，而不是用 workflow_run：
+#   - 「等」是轮询 ppu-linux-build-810 在同一个 head sha 上的 run，而不是用 workflow_run：
 #     workflow_run 只读默认分支上的 workflow 文件，且它的 run 不会作为 PR 的 check 出现，
 #     当不了 PR 门禁。
-#   - 代价：触发条件必须与 ppu_linux_build.yml 完全一致（见下面的 branches / paths），
+#   - 代价：触发条件必须与 ppu_linux_build_810.yml 完全一致（见下面的 branches / paths），
 #     否则会出现「本 workflow 触发了、但那个 PR 根本没编包」→ 永远等不到 whl。
 #
-# 与 test-h100.yml 的差异：
-#   - 不在本 workflow 里编：test-h100 走 _linux-build.yml 同条流水线先编 wheel 再测；
-#     这里复用 ppu_linux_build.yml 已经编好的产物，避免每条测试门禁各编一次
-#     （PPU 冷编译要 4~5h）。
-#   - 不装 PPU SDK：PPU 镜像里已自带，.ci/ppu/sdk_env.sh 只做校验 + source envsetup.sh。
-#     但测试框架依赖（pytest 及其插件等）镜像里没有，由 .ci/ppu/install_test_deps.sh 按
-#     .ci/docker/requirements-ci.txt 的版本补装，保证与官方 CI 跑 test case 的环境一致。
-#   - 只跑 CUDA 相关用例，且裁掉 H100/B200 专属用例，以及 FP8 用例（真武 PPU 当前不支持
-#     FP8）。用例清单见 .ci/ppu/smoke_test.sh。
-name: ppu-smoke
+# 只跑 CUDA 相关用例，且排除 FP8：两层过滤（环境变量 PYTORCH_TESTING_DEVICE_ONLY_FOR=cuda
+# + --include 文件级白名单；FP8 再叠一层 pytest -k），实现与清单都在
+# .ci/ppu/distributed_test.sh。
+name: ppu-distribute-810
 
 on:
-  # 触发条件必须与 ppu_linux_build.yml 保持一致：本 workflow 依赖它的 whl，
-  # 「smoke 触发了但 build 没触发」等价于卡死到超时。改一侧就要同步改另一侧。
+  # 触发条件必须与 ppu_linux_build_810.yml 保持一致：本 workflow 依赖它的 whl，
+  # 「distribute 触发了但 build 没触发」等价于卡死到超时。改一侧就要同步改另一侧。
   pull_request:
     branches:
       - v2.11.0-for-ci
@@ -41,9 +49,9 @@ on:
       - 'torchgen/**'
       - 'setup.py'
       - '.ci/ppu/**'
-      - '.github/workflows/ppu_linux_build.yml'
+      - '.github/workflows/ppu_linux_build_810.yml'
       - '.github/workflows/_ppu_build.yml'
-      - '.github/workflows/ppu_smoke.yml'
+      - '.github/workflows/ppu_distribute_810.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
@@ -51,15 +59,18 @@ concurrency:
 
 permissions:
   contents: read
-  # 轮询 ppu-linux-build 的 run 状态、以及跨 run 下载它的 whl artifact 都需要
+  # 轮询 ppu-linux-build-810 的 run 状态、以及跨 run 下载它的 whl artifact 都需要
   actions: read
 
 env:
   # PPU 基础镜像：python3.12 + CUDA13 + PPU SDK + triton，不含 torch —— torch 由
-  # ppu-linux-build 的 whl 提供。刻意与 _ppu_build.yml 的 docker-image 默认值用同一个 tag：
+  # ppu-linux-build-810 的 whl 提供。刻意与 _ppu_build.yml 的 docker-image 默认值用同一个 tag：
   # 编译与运行同镜像，才不会出现 whl 与镜像里 SDK / 工具链对不上的问题。
   # 注意：这里必须是 PPU 镜像，不能填 actions-runner 镜像——后者以非 root 用户 runner
   # (uid 1001) 启动，action 在 pod 内创建 source_dir 时会 mkdir /workspace 失败（Permission denied）。
+  # 也刻意没有用需求里给的那个验证用镜像（reg.docker.alibaba-inc.com/.../llm:pytorch2.9.0-...）：
+  # 它自带 torch 2.9.0，会与本门禁要装的 PR whl 打架（同名包，装谁取决于 pip 解析顺序），
+  # 而且不是编译侧用的那个镜像。要换镜像必须编译侧一起换。
   # 前置要求：该镜像须已预拉到 NODE_SELECTOR 指定板型的节点上（action 文档「前置要求」第 3 条）。
   # 换镜像 tag 或换板型时都要重新确认预拉，否则 pod 会卡在拉取阶段直至超时。
   IMAGE: pkg.flytiger-eco.com/docker_release/ppu:v2.1.1-cuda13.0-ubuntu24-py312
@@ -67,16 +78,24 @@ env:
   HOST_VOLUMES: "/nas_aisw:/nas_aisw,/wl_nas:/mnt/wl_nas"
   # action 在 pod 内解压源码的路径（也是 action 的默认值，这里显式写出便于 command 引用）
   SOURCE_DIR: /workspace/source
-  # 板型选 890P：集群里 890P 有 16 台（每台 8 PPU），810E 只有 1 台（16 PPU）。
-  # 本 workflow 是每个 PR 都触发的高频门禁，钉在 810E 会把所有 PR 排队到同一台机器上。
-  NODE_SELECTOR: "board-type=ZW-M890P"
+  # 本文件是 810E 那一套：被测的是 ppu-linux-build-810 编出的 arch 8.0 whl，必须钉在 810E 上。
+  # 容量现实：集群里 810E 只有 1 台（16 PPU），890P 有 16 台（每台 8 PPU）。
+  # 本 job 只要 2 卡，占卡不多，但会与 ppu-smoke-810 / ppu-accuracy-810 / ppu-perf-810 /
+  # ppu-full-ut-810 挤在同一台机器上排队。
+  NODE_SELECTOR: "board-type=OAM-810E"
   # 内部 pip 源：pod 内只能访问内网，补装 run_test.py 必需的 pytest 插件要走这个源。
   # 仓库名是 pypi_index（带下划线的 VIRTUAL 仓，聚合 pypi_formal/aliyun/huawei/tsinghua 等代理）。
   # 写成 pypiindex 会命中不存在的仓库，Artifactory 对所有包返回 404，pip 报
   # "Could not find a version that satisfies the requirement ... (from versions: none)"。
   PIP_INDEX: https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple
+  # inductor 的 codegen 后端 triton：钉版本，且只从上面那个内部仓装（镜像自带的版本不保证
+  # 与本 PR 的 torch 匹配）。本门禁里的 distributed/test_inductor_collectives 等用例走 inductor
+  # codegen，同样依赖它。安装由 .ci/ppu/install_triton.sh 完成，不做多源回退、也不退回镜像
+  # 默认源，所以改这个版本号前请先确认它在 PIP_INDEX 那个仓上确实存在。
+  # 四条测试门禁（smoke 除外）共用同一个版本号，改一侧就要同步改另几侧。
+  TRITON_VERSION: "3.6.0"
   # 依赖的编译门禁：按 workflow 文件名找它在同一个 head sha 上的 run
-  BUILD_WORKFLOW: ppu_linux_build.yml
+  BUILD_WORKFLOW: ppu_linux_build_810.yml
   # whl 落地目录（相对源码根）。必须在源码树内，且不能被 .gitignore 命中：
   # 它要靠 ppu-distributed-action 打包源码一起送进 pod，而 dist/ 在 .gitignore 里，
   # 按 gitignore 过滤的打包方式会把它整个丢掉。
@@ -84,10 +103,10 @@ env:
   # 等 build 的上限。这是**兜底**而不是正常退出路径：正常情况下等待由 build run 自己的结论
   # 终止 —— 编译成功就往下走；编译失败、或它自己撞上 job 超时（GitHub 记成
   # conclusion=failure），都会立刻命中下面的「未成功」分支快速失败。
-  # 所以这个值必须严格大于 build 自己的 job 上限，否则会出现「build 还在正常编、smoke 先判
+  # 所以这个值必须严格大于 build 自己的 job 上限，否则会出现「build 还在正常编、测试先判
   # 超时」的假失败：whl 最终编出来了，却没有任何门禁测它，只能手动重跑。
   # 取值 = 350 + 40：
-  #   - 350 是 build 的硬上限（ppu_linux_build.yml 不传 timeout-minutes，取 _ppu_build.yml
+  #   - 350 是 build 的硬上限（ppu_linux_build_810.yml 不传 timeout-minutes，取 _ppu_build.yml
   #     的默认值 350，覆盖冷编译 4~5h 的情况）。改那个默认值必须同步改这里。
   #   - 40 是排队余量：build 的 350 分钟从它真正开始执行才计时，而本步骤的秒表从 run 创建
   #     就开始跑，等 x86-ubuntu2404-8-32 空闲的 queued 时间只算在本侧。
@@ -104,16 +123,18 @@ env:
   WAIT_MAX_API_FAILURES: "10"
 
 jobs:
-  ppu-smoke-890p-single:
-    name: ppu-smoke (890P 单卡)
+  ppu-distribute-810e-multi:
+    name: ppu-distribute (810E 多卡 2 PPU)
+    # runner 与 ppu_smoke_810.yml 一致：这里只做编排（等 whl、下载、提交 pod），零占卡，
+    # 算力全部消耗在 action 拉起的 PPU pod 里。
     runs-on: k8s-runner-group-cpu-flytiger
     container:
       image: ghcr.io/actions/actions-runner:latest
-    # = 等 build 的上限(390) + 用例超时(60) + checkout/下载 whl/pod 启动与打包余量(30)。
+    # = 等 build 的上限(390) + 用例超时(240) + checkout/下载 whl/pod 启动与打包余量(40)。
     # 必须大于 WAIT_TIMEOUT_MINUTES：否则秒表还没到点、job 先被砍，日志里只剩一条没有
     # 任何原因说明的 job 超时。命中缓存时实际远低于此。
     # 注：6 小时 job 上限只约束 GitHub 托管 runner，本 job 在自建 ARC runner 上不受该限制。
-    timeout-minutes: 480
+    timeout-minutes: 670
 
     steps:
       # -----------------------------------------------------------------------
@@ -128,8 +149,8 @@ jobs:
       # 不需要手动清场（与 whl 不同）：checkout 发现目录里的 .git 无效或 remote 对不上时会
       # 自己清空目录重新 clone，半个 .git 也能被下一次 fetch 续上。
       # 三段的 with: 必须逐字一致，否则重试会签出与第一次不同的东西。
-      # 以下五步在 ppu_smoke.yml / ppu_accuracy.yml / ppu_perf.yml / ppu_distribute.yml 里逐字
-      # 相同，改一处必须同步改另三处（ppu_full_ut.yml 的 8 个分片只差 ref 取 github.sha）。
+      # 以下五步在 ppu_smoke_810.yml / ppu_accuracy_810.yml / ppu_perf_810.yml / ppu_distribute_810.yml 里逐字
+      # 相同，改一处必须同步改另三处（ppu_full_ut_810.yml 的 8 个分片只差 ref 取 github.sha）。
       # -----------------------------------------------------------------------
       - name: Checkout PyTorch
         id: checkout
@@ -168,10 +189,10 @@ jobs:
           fetch-depth: 1
 
       # -----------------------------------------------------------------------
-      # 等本 PR 的 whl 编好 → 下载到源码树内 → 校验。以下三步在 ppu_smoke.yml /
-      # ppu_accuracy.yml / ppu_perf.yml / ppu_distribute.yml 里逐字相同，改一处必须同步
+      # 等本 PR 的 whl 编好 → 下载到源码树内 → 校验。以下三步在 ppu_smoke_810.yml /
+      # ppu_accuracy_810.yml / ppu_perf_810.yml / ppu_distribute_810.yml 里逐字相同，改一处必须同步
       # 改另三处（diff 这四个文件即可确认没漂移）。
-      # ppu_full_ut.yml 把「等待」拆成了独立 job（给 8 个分片共用），但它的
+      # ppu_full_ut_810.yml 把「等待」拆成了独立 job（给 8 个分片共用），但它的
       # github-script 脚本与下面那一段也是逐字相同的，改这里同样要同步改它。
       #
       # 为什么不抽成 composite action：本 job 跑在 ARC(Actions Runner Controller) 自建
@@ -181,7 +202,7 @@ jobs:
       # checkout 成功。改写成 owner/repo/.github/actions/xxx@ref 也不行：uses 不支持
       # 表达式，ref 只能写死，而改 action 的 PR 就没法自测自己那一版。
       # -----------------------------------------------------------------------
-      - name: 等待 ppu-linux-build 编译完成
+      - name: 等待 ppu-linux-build-810 编译完成
         id: wait-build
         # 只调 REST API，不占 PPU 卡；pod 要到真正跑用例那一步才拉起
         uses: actions/github-script@v7
@@ -279,7 +300,7 @@ jobs:
               } else if (waited > graceMs) {
                 core.setFailed(
                   `[wait] 等了 ${waitedMin} 分钟仍找不到 ${workflow} 在 ${headSha} 上的 run。\n` +
-                  '最常见原因：本 workflow 与 ppu_linux_build.yml 的 branches / paths 过滤不一致，' +
+                  '最常见原因：本 workflow 与 ppu_linux_build_810.yml 的 branches / paths 过滤不一致，' +
                   '导致这个 PR 只触发了测试、没触发编译。'
                 );
                 return;
@@ -386,17 +407,37 @@ jobs:
             echo "- 来源: ${BUILD_RUN_URL}"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: "890P 单卡 (1 PPU) CUDA 冒烟测试"
+      # -----------------------------------------------------------------------
+      # 下一步 action 会 `cp -a $GITHUB_WORKSPACE/.` 到 NAS 再打包，先把 .git 删掉：
+      #   - 体积：即使 fetch-depth: 1，.git 的 pack 仍占 workspace 的大头，而 staging 是
+      #     写 NAS(NFS)，单次就要花几分钟。
+      #   - 正确性：pod 内跑的 run_test.py、全部用例与 .ci/ppu/distributed_test.sh 都不调 git，
+      #     删掉不影响测试（只有 build 侧的 .ci/ppu/build_wheel.sh 要 rev-parse，不在本链路）。
+      #   - 兼删了 cp "Permission denied" 的唯一触发源：.git 的 *.pack/*.idx/*.rev
+      #     是源码树里唯一的只读(0444)文件。
+      # 本步骤在 actions-runner 容器里跑（无 bash，回退 sh），只用 POSIX 写法。
+      # -----------------------------------------------------------------------
+      - name: 删掉 .git（减小 NAS 暂存体积）
+        run: rm -rf .git
+
+      - name: "810E 多卡 (2 PPU) CUDA 分布式测试"
         uses: flytiger-eco/ppu-distributed-action@main
         with:
+          # nnodes: 0 → SINGLE_MODE：只起 1 个 worker pod，不建 PodGroup / headless Service。
+          # nproc_per_node: 2 → 该 pod 的 resources 请求 alibabacloud.com/ppu: "2"，
+          # 也就是容器里可见 2 张 PPU；command 仍只执行一次（不是每卡一次）。
           nnodes: 0
-          nproc_per_node: 1
+          nproc_per_node: 2
           node_selector: ${{ env.NODE_SELECTOR }}
           host_volumes: ${{ env.HOST_VOLUMES }}
           image: ${{ env.IMAGE }}
           namespace: ${{ env.NAMESPACE }}
           source_dir: ${{ env.SOURCE_DIR }}
-          timeout_minutes: 60
+          # 比 smoke 的 60 分钟长得多：分布式用例每条都要 spawn 多进程 + 建 process group，
+          # 且清单里 test_dynamo_distributed / test_inductor_collectives / test_fully_shard_compile
+          # 这几条都带编译，单条就可能几十分钟。仍需 < 上面 job 的 timeout-minutes 减去等 build
+          # 的 390，否则 pod 还没超时、job 先被砍，日志里只剩一条没有原因的 job 超时。
+          timeout_minutes: 240
           # 环境变量必须在 command 里注入：job 级 env 不会传进 PPU pod。
           # 脚本自身会 cd 到源码根目录，所以这里只给绝对路径即可。
           # WHEEL_DIR 指向上面下载的 whl（已随源码被 action 打包到 pod 的 source_dir 下）。
@@ -405,4 +446,6 @@ jobs:
             WHEEL_DIR="${{ env.SOURCE_DIR }}/${{ env.WHEEL_DIR_REL }}" \
             SDK_INSTALL_DIR="/usr/local" \
             PIP_INDEX="${{ env.PIP_INDEX }}" \
-            bash ${{ env.SOURCE_DIR }}/.ci/ppu/smoke_test.sh
+            TRITON_INDEX="${{ env.PIP_INDEX }}" \
+            TRITON_VERSION="${{ env.TRITON_VERSION }}" \
+            bash ${{ env.SOURCE_DIR }}/.ci/ppu/distributed_test.sh
