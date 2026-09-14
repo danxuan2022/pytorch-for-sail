@@ -6,7 +6,7 @@
 #
 # 定位：
 #   - 触发：针对 v2.11.0-for-ci 的 pull_request（外加 workflow_dispatch 便于临时手动出包）
-#   - 缓存：restore 本分支 890 基线；只在「一次都没命中」时回写一份（见下）
+#   - 缓存：只读不写 —— restore 本分支 890 基线做增量编译（原因见下）
 #   - 产出：dist/torch-*.whl 上传为 artifact（ppu-wheel-<env>-890-<commit>，保留 14 天）
 #     下游：ppu_smoke_890.yml / ppu_accuracy_890.yml / ppu_perf_890.yml /
 #     ppu_full_ut_890.yml / ppu_distribute_890.yml 会等本流水线完成，下载这份 artifact 到
@@ -14,19 +14,23 @@
 #     「等待 ppu-linux-build-890 编译完成」步骤）。因此下面的 branches / paths 必须与那五条
 #     保持一致：只要出现「测试触发了、编译没触发」，那五条就会等到宽限期超时失败。
 #
-# 缓存怎么回写（save-ccache-on-miss=true）：
-#   pull_request run 写出的缓存归属 refs/pull/<N>/merge 作用域，只有同一个 PR 的后续
-#   push / re-run 能读到 —— base 分支和其它 PR 一条都读不到。所以规则是
-#   「谁发现 cache miss，谁就负责写一次」：
-#     - 第一个 commit 若连前缀回退都没命中（冷编译），编译成功后回写一份；
-#       同 PR 后续 commit 就能命中它做增量编译，不必每次都从零编 4~5h。
-#     - 命中过缓存的 run 不再回写：同一份内容重复占用 10GiB 仓库配额，还会把分支基线
-#       按 LRU 挤出去。
-#   跨 PR 共享的那份基线仍由 ppu_refresh_cache.yml（每日定时）负责种。
+# 为什么本流水线不写缓存：
+#   GitHub 缓存的隔离在**作用域（scope）**，不在 key。pull_request 的 run 写出的条目归
+#   refs/pull/<N>/merge，只有同一个 PR 的后续 push / re-run 能读到 —— base 分支和其它
+#   PR 一条都读不到，哪怕 key 与基线一字不差（前缀里本来就没有 PR 标识）。
+#   于是让 PR 回写只能服务它自己，却要占满仓库 10GiB 配额：两份基线已占 8G，再进一两
+#   条冷 PR 就顶破配额，GitHub 按 LRU 淘汰时很可能把共享基线挤掉 —— 结果是所有 PR
+#   下一轮全变 4~5h 冷编译。所以回写这件事完全交给 ppu_refresh_cache.yml：
+#     - 它由定时（每日 00:00）/ push（编译实现、.ci/ppu 脚本合入时）/ 手动触发，
+#       run 跑在分支上，写出的条目对全仓库 PR 可见；
+#     - 它开了 prune-old-ccache，回写前先删同前缀旧条目，保证「每分支 × 每板型
+#       恰好一份」，配额不会膨胀。
 #
 # 命中率掉下来了怎么办：
-#   等 ppu_refresh_cache.yml 的定时任务跑一次即可（它会同时刷 810 / 890 两份基线），
+#   等 ppu_refresh_cache.yml 跑一次即可（它会同时刷 810 / 890 两份基线），
 #   急用就手动触发一次，本文件无需改动。
+#   注意：同一个 PR 的每个 commit 都从同一份基线起算增量（本流水线不积累缓存），
+#   所以基线越新，整条 PR 的每次编译都越快。
 #
 # 编译逻辑不在本文件里：
 #   镜像、PPU SDK、ccache 配置、并行度 / OOM 防护、产物收集等全部在
@@ -63,15 +67,11 @@ on:
       - '.github/workflows/ppu_full_ut_890.yml'
       - '.github/workflows/ppu_distribute_890.yml'
   # 手动触发用于临时出包。在 topic 分支上跑读不到 v2.11.0-for-ci 的缓存（兄弟分支作用域
-  # 不可见），必然冷编译；此时也会按 save-ccache-on-miss 顺手往当前分支作用域种一份
+  # 不可见），必然冷编译 4~5h，且本流水线不回写，下一次手动跑还是冷的
   workflow_dispatch:
 
 permissions:
   contents: read
-  # 只为了 _ppu_build.yml 里的 Report repo cache usage 能列出 ppu-ccache-* 条目（gh cache list
-  # 需 actions:read）。开了回写后这一步在 PR 上也会跑到，没它只会打印一行「需权限」。
-  # 注意：写缓存本身不靠 GITHUB_TOKEN（走 ACTIONS_RUNTIME_TOKEN），不需要 actions:write。
-  actions: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
@@ -85,6 +85,5 @@ jobs:
       # 名里的板型后缀。镜像 / 环境标识前缀一律不传，用 _ppu_build.yml 的默认值，
       # 保证与 ppu_refresh_cache.yml 的 890 分支算出同一个 cache key 前缀
       board: "890"
-      # 冷编译的那一次顺手把缓存种上，让同 PR 后续 commit 能增量编译（原因见文件头）
-      save-ccache-on-miss: true
+      # 不传 save-ccache：默认 false，本流水线只读缓存不回写（原因见文件头）
       upload-wheel: true

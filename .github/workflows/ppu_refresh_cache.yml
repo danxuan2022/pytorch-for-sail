@@ -7,12 +7,23 @@
 #   （ppu_linux_build_810.yml / ppu_linux_build_890.yml）restore 这份基线做增量编译。
 #   本流水线不产出对外的 whl（upload-wheel=false），它的产出就是缓存本身。
 #
+# 为什么共享基线只能由本流水线写（全仓库只此一处回写）：
+#   GitHub 缓存的隔离在**作用域（scope）**，由「创建条目的 ref」决定，与 key 叫什么无关：
+#     - 一次 run 只能 restore 到「自己的 ref + base 分支 + 默认分支」这三个作用域的条目；
+#     - pull_request 的 run 写出的条目落在 refs/pull/<N>/merge，其它 PR 一条都读不到 ——
+#       就算把 key 取得再「公共」也没用（前缀里本来就不带 PR 标识，问题不在 key 层）。
+#   能写进「所有 PR 都读得到」作用域的，只有跑在分支上的 run：push / schedule /
+#   workflow_dispatch —— 也就是本流水线的三种触发方式。
+#   （可自证的观察点：_ppu_build.yml 里 Report repo cache usage 跑的 gh cache list 是仓库级的，
+#    能列出所有条目并带 REF 列。能列出 ≠ 能 restore。）
+#
 # 与 PR 流水线的分工：
-#   - 本流水线写的是「跨 PR 共享」的基线：它的 run 落在默认分支 / 目标分支作用域，
-#     全仓库的 PR 都读得到。
-#   - PR 流水线只在自己完全没命中时回写一次（save-ccache-on-miss），那份缓存归属
-#     refs/pull/<N>/merge，只有同一个 PR 后续的 commit 能读到。
-#   → 所以本流水线停了不会立刻挂门禁，但每个 PR 的第一个 commit 都会退化成 4~5h 冷编译。
+#   - 本流水线：唯一的写入方，save-ccache=true + prune-old-ccache=true，维护「每分支 ×
+#     每板型恰好一份」基线。
+#   - PR 流水线（ppu_linux_build_810/890.yml）：只读，一律不回写。
+#   → 所以本流水线停了不会立即挂门禁，但基线一旧，所有 PR 的每次编译都变慢；
+#     基线被淘汰或从未种过时，每条 PR 的每个 commit 都是 4~5h 冷编译。
+#     另：GitHub 会自动删除 7 天未被访问的条目，每日定时同时起到保活作用。
 #
 # 触发方式：
 #   1. schedule：每天 00:00（北京时间）各刷一次 810 / 890
@@ -39,8 +50,8 @@
 #   810 与 890、v2.11.0-for-ci 与 v2.10.0 因此落在互不相同的前缀上，互不覆盖、互不命中。
 #
 # 10GiB 配额换算（GitHub 单仓库缓存总配额）：
-#   稳态 = 2 个板型 × ccache-maxsize(3G) = 6G，留 4G 给 PR 自己 miss 时回写的条目
-#   （PR 那份归 refs/pull/<N>/merge，同样计入仓库总量）。
+#   稳态 = 2 个板型 × ccache-maxsize(4G) = 8G，留 2G 余量。因为 PR 侧不回写，条目数
+#   恒为「分支数 × 板型数」，不会被 PR 活动抬高。
 #   prune-old-ccache=true 会在回写前删掉同前缀旧条目，保证「每个板型每分支只留一份」，
 #   否则历史条目累积后 GitHub 按 LRU 淘汰，很容易把另一份基线挤掉。
 #   → 如果以后再加板型 / 再加分支，必须同步下调 ccache-maxsize。
@@ -71,7 +82,7 @@ on:
       ccache-maxsize:
         description: ccache 容量上限（板型数 × 分支数 × 该值须留在 10GiB 配额内）
         type: string
-        default: "3G"
+        default: "4G"
       ignore-ccache:
         description: 忽略现有缓存做冷编译，重建一份干净基线
         type: boolean
@@ -127,10 +138,10 @@ jobs:
       # push / schedule 事件下 inputs 上下文为 null，会渲染成空串；下游 ignore-ccache /
       # upload-wheel 声明为 boolean，空串过不了类型校验，run 会在启动前就失败。
       # 另外 upload-wheel 在 _ppu_build.yml 侧默认是 true，兜底值必须显式给 false。
-      ccache-maxsize: ${{ inputs.ccache-maxsize || '3G' }}
+      ccache-maxsize: ${{ inputs.ccache-maxsize || '4G' }}
       ignore-ccache: ${{ inputs.ignore-ccache || false }}
       upload-wheel: ${{ inputs.upload-wheel || false }}
-      # 本流水线存在的意义就是回写缓存
+      # 本流水线存在的意义就是回写缓存，而且全仓库只有这一处写（原因见文件头）
       save-ccache: true
       # 回写前清掉本分支 + 本板型的历史条目，保证「每个板型每分支只留一份」
       prune-old-ccache: true

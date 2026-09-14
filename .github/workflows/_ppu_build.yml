@@ -8,20 +8,21 @@
 #   这里，调用方只传参、不复制 steps。
 #
 # 当前调用方（每种板型一条 PR 流水线，靠 board 区分）：
-#   - ppu_refresh_cache.yml     : 定时 / 手动，矩阵跑 board=810/890，save-ccache=true
-#   - ppu_linux_build_810.yml   : PR 触发，board=810（arch 8.0），save-ccache-on-miss=true
-#   - ppu_linux_build_890.yml   : PR 触发，board=890（arch 8.9），save-ccache-on-miss=true
+#   - ppu_refresh_cache.yml     : 定时 / push / 手动，矩阵跑 board=810/890，save-ccache=true
+#   - ppu_linux_build_810.yml   : PR 触发，board=810（arch 8.0），只读缓存
+#   - ppu_linux_build_890.yml   : PR 触发，board=890（arch 8.9），只读缓存
 #
-# 两种回写模式的分工（缓存分支作用域是 GitHub 的硬性规则，下面这套分工完全由它决定）：
+# 只有刷缓存流水线回写，PR 一律只读 —— 这不是保守，而是缓存作用域决定的（GitHub 硬规则）：
 #   - 缓存条目按创建它的 ref 隔离。一次 run 只能读到「当前分支 + base 分支 + 默认分支」
-#     这三个作用域里的条目，读不到兄弟分支 / 子分支的。
-#   - save-ccache=true（无条件回写）只给 ppu_refresh_cache.yml 用：它跑在默认分支 /
-#     目标分支上，写出的条目对全仓库的 PR 可见，是「跨 PR 共享」的那份基线。
-#   - save-ccache-on-miss=true（首次 miss 才回写）给 PR 流水线用：pull_request run 写出的
-#     缓存归属 refs/pull/<N>/merge，只有同一个 PR 的后续 push / re-run 能读到。所以
-#     「谁冷编译谁负责种一次」—— 第一个 commit 全 miss 时回写一份，同 PR 后续 commit 就能
-#     命中它做增量编译；命中过的 run 不再回写，避免同一个 PR 每个 commit 往 10GiB 配额里
-#     塞一份、把分支基线按 LRU 挤出去。
+#     这三个作用域里的条目，读不到兄弟分支 / 其它 PR 的。
+#   - pull_request 的 run 写出的条目落在 refs/pull/<N>/merge，别的 PR 一条都读不到 ——
+#     哪怕 key 与基线一字不差（前缀里本来就没有 PR 标识）。让 PR 回写只能服务它自己，
+#     却要占满仓库 10GiB 配额，GitHub 按 LRU 淘汰时很可能把共享基线挤掉，反而让所有 PR
+#     下一轮全变冷编译。
+#   - 因此 save-ccache=true 只给 ppu_refresh_cache.yml：它由定时 / push 触发，跑在分支上，
+#     写出的条目对全仓库 PR 可见，就是「跨 PR 共享」的那唯一一份基线。
+#   （可自证的观察点：下面 Report repo cache usage 跑的 gh cache list 是仓库级的，能列出
+#    所有条目并带 REF 列 —— 能列出 ≠ 能 restore。）
 # =============================================================================
 name: ppu-build (reusable)
 
@@ -80,15 +81,9 @@ on:
       ccache-maxsize:
         description: ccache 容量上限；配额换算见 ppu_refresh_cache.yml 文件头
         type: string
-        default: "3G"
+        default: "4G"
       save-ccache:
-        description: 编译成功后无条件回写 ccache（只有种基线的流水线该开）
-        type: boolean
-        default: false
-      save-ccache-on-miss:
-        description: |
-          仅在「一次都没命中」时回写一份（PR 流水线用）。
-          谁冷编译谁负责种，同 PR 后续 commit 即可增量编译；命中过就不再写，省配额
+        description: 编译成功后回写 ccache（只有 ppu_refresh_cache.yml 该开，原因见文件头）
         type: boolean
         default: false
       prune-old-ccache:
@@ -325,32 +320,20 @@ jobs:
           restore-keys: ${{ steps.cache-meta.outputs.restore-prefix }}
 
       - name: Report ccache state
-        id: cache-state
         env:
           MATCHED_KEY: ${{ steps.ccache.outputs.cache-matched-key }}
           IGNORED: ${{ inputs.ignore-ccache }}
-          SAVE_ON_MISS: ${{ inputs.save-ccache-on-miss }}
         run: |
-          # full-miss = 「连前缀回退都没找到条目」，不是 restore-keys 部分命中。
-          # 它直接决定 save-ccache-on-miss 要不要回写：只有真的冷编译的那一次才写，
-          # 命中过的 run 不写，否则同一个 PR 每个 commit 都往 10GiB 配额里塞一份
-          full_miss=false
           if [[ "${IGNORED}" == "true" ]]; then
             echo "[cache] ignore-ccache=true → 跳过 restore，本轮冷编译"
-            full_miss=true
           elif [[ -z "${MATCHED_KEY}" ]]; then
+            # PR 侧不会回写（作用域原因见文件头），所以这里只能靠刷缓存流水线补
             echo "[cache] 未命中任何 ccache → 本轮冷编译（全部 miss）"
-            echo "[cache] 若目标分支上还没种过缓存，等 ppu_refresh_cache.yml 的定时任务跑一次即可（也可手动触发）"
-            full_miss=true
+            echo "[cache] 若目标分支上还没种过缓存，等 ppu_refresh_cache.yml 跑一次即可"
+            echo "[cache]       （每日定时 / 编译实现或 .ci/ppu 合入时 push 触发 / 也可手动触发）"
           else
             echo "[cache] 命中 ${MATCHED_KEY}"
             du -sh "${RUNNER_TEMP}/ppu-ccache" || true
-          fi
-          echo "full-miss=${full_miss}" >> "$GITHUB_OUTPUT"
-
-          if [[ "${full_miss}" == "true" && "${SAVE_ON_MISS}" == "true" ]]; then
-            echo "[cache] 本轮 miss + save-ccache-on-miss=true → 编译成功后由本 run 回写一份，"
-            echo "[cache]       同一个 PR 后续 commit 就能命中它做增量编译"
           fi
 
       # 主防线是 MAX_JOBS + 链接 job pool；swap 只是给链接阶段的尖峰留缓冲。
@@ -561,9 +544,7 @@ jobs:
           MATCHED_KEY: ${{ steps.ccache.outputs.cache-matched-key }}
           CCACHE_HIT_RATE: ${{ steps.ccache-stats.outputs.hit-rate }}
           CACHE_BRANCH: ${{ inputs.cache-branch || github.event.pull_request.base.ref || github.ref_name }}
-          # 本轮到底会不会回写（无条件回写 or 首次 miss 回写），直接写进 summary，
-          # 不用去翻日志猜
-          SAVE_CCACHE: ${{ inputs.save-ccache || (inputs.save-ccache-on-miss && steps.cache-state.outputs.full-miss == 'true') }}
+          SAVE_CCACHE: ${{ inputs.save-ccache }}
         run: |
           # 容器以 root 写出 dist/，runner 用户需可读才能 glob / 上传 artifact；
           # 必须在 glob 之前 chown，否则 dist/ 不可读时会算出空结果
@@ -612,7 +593,7 @@ jobs:
           overwrite: true
 
       - name: Prepare ccache for upload
-        if: ${{ success() && (inputs.save-ccache || (inputs.save-ccache-on-miss && steps.cache-state.outputs.full-miss == 'true')) }}
+        if: ${{ success() && inputs.save-ccache }}
         run: |
           # 容器以 root 写缓存目录，runner 用户需可读才能打包上传
           SUDO=""
@@ -622,9 +603,10 @@ jobs:
           $SUDO chown -R "$(id -u):$(id -g)" "${RUNNER_TEMP}/ppu-ccache" 2>/dev/null || true
           echo "[cache] 待上传 ccache 大小 $(du -sh "${RUNNER_TEMP}/ppu-ccache" | cut -f1)"
 
-      # 只给「无条件回写」的刷缓存流水线用，绝不能开给 PR 的 save-ccache-on-miss：
-      #   gh cache list 是仓库级的，同前缀的条目里包括别人种的分支基线。一条 PR run
-      #   把它删了，其余所有 PR 下一轮全变冷编译。
+      # 只给刷缓存流水线用（PR 只读，根本进不到这里）：
+      #   gh cache list 是仓库级的，同前缀的条目里包括别人种的分支基线。假如哪天又给 PR
+      #   开了回写，千万不能顺手把 prune 也开给它 —— 一条 PR run 删了基线，其余所有 PR
+      #   下一轮全变冷编译。
       # 而在刷缓存流水线里，删旧条目必须在 save 之前，不能在之后：
       #   仓库总配额只有 10GiB。若先写新条目，同分支会短暂占用「新 + 旧」两份，总量顶破
       #   配额后 GitHub 按 LRU 淘汰 —— 而刚被 restore 过的旧条目反而是「最近使用」的，
@@ -650,38 +632,32 @@ jobs:
           done
 
       - name: Save ccache
-        if: ${{ success() && (inputs.save-ccache || (inputs.save-ccache-on-miss && steps.cache-state.outputs.full-miss == 'true')) }}
-        # 首次 miss 回写是「顺手种一份」，不能把已经编出 whl 的编译门禁弄成红的：
-        # fork 发起的 PR 拿到的是只读 token，写缓存会直接失败；配额满、上传超时也同理。
-        # 刷缓存流水线（save-ccache=true）相反：回写就是它唯一的产出，写不进去必须报错。
-        continue-on-error: ${{ !inputs.save-ccache }}
+        if: ${{ success() && inputs.save-ccache }}
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/ppu-ccache
           key: ${{ steps.cache-meta.outputs.key }}
 
       - name: Skip ccache save
-        if: ${{ success() && !inputs.save-ccache && !(inputs.save-ccache-on-miss && steps.cache-state.outputs.full-miss == 'true') }}
+        if: ${{ success() && !inputs.save-ccache }}
         env:
           CACHE_BRANCH: ${{ inputs.cache-branch || github.event.pull_request.base.ref || github.ref_name }}
-          SAVE_ON_MISS: ${{ inputs.save-ccache-on-miss }}
         run: |
-          if [[ "${SAVE_ON_MISS}" == "true" ]]; then
-            echo "[cache] 本轮已命中缓存，不再回写。"
-            echo "[cache] 规则是「谁 miss 谁负责写一次」：命中的 run 再写一份只是把同一份内容"
-            echo "[cache]       又占一遍 10GiB 配额，还会把分支基线按 LRU 挤出去。"
-          else
-            echo "[cache] 本流水线只读缓存，不回写（save-ccache / save-ccache-on-miss 均为 false）。"
-          fi
-          echo "[cache] ${CACHE_BRANCH} 的跨 PR 共享基线由 ppu_refresh_cache.yml 维护（每日定时 + 可手动触发）"
+          echo "[cache] 本流水线只读缓存，不回写。"
+          echo "[cache] 原因：pull_request 的 run 写出的条目归 refs/pull/<N>/merge 作用域，别的 PR"
+          echo "[cache]       一条都读不到（与 key 叫什么无关），只会白占 10GiB 仓库配额，"
+          echo "[cache]       还可能把共享基线按 LRU 挤掉。"
+          echo "[cache] ${CACHE_BRANCH} 的跨 PR 共享基线由 ppu_refresh_cache.yml 独家维护"
+          echo "[cache]       （每日定时 + 编译实现/脚本合入时 push 触发 + 可手动触发）。"
 
       - name: Report repo cache usage
-        if: ${{ always() && (inputs.save-ccache || (inputs.save-ccache-on-miss && steps.cache-state.outputs.full-miss == 'true')) }}
+        if: ${{ always() && inputs.save-ccache }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # 稳态应该是「每分支 × 每种架构一份基线」+ 少量 PR 自己种的条目，总量在 10GiB 以内
+          # 稳态应该是「每分支 × 每板型恰好一份基线」（prune 保证），总量在 10GiB 以内。
+          # 如果这里列出了 refs/pull/<N>/merge 的条目，说明有人给 PR 开了回写，该排查。
           echo "=== 当前仓库 ppu-ccache-* 条目 ==="
           gh cache list --repo "${GITHUB_REPOSITORY}" --key "ppu-ccache-" \
             --limit 50 2>/dev/null || echo "（需 actions:read 权限才能列出）"
