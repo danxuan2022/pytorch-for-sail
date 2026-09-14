@@ -1,9 +1,9 @@
 # =============================================================================
-# PPU torch whl 编译门禁：v2.11.0 的 PR 级流水线（只读缓存）。
+# PPU torch whl 编译门禁：v2.11.0-for-ci 的 PR 级流水线（只读缓存）。
 #
 # 定位：
-#   - 触发：针对 v2.11.0 的 pull_request（外加 workflow_dispatch 便于临时手动出包）
-#   - 缓存：只 restore、不 save。读的是 ppu_refresh_cache.yml 在 v2.11.0 上种下的
+#   - 触发：针对 v2.11.0-for-ci 的 pull_request（外加 workflow_dispatch 便于临时手动出包）
+#   - 缓存：只 restore、不 save。读的是 ppu_refresh_cache.yml 在 v2.11.0-for-ci 上种下的
 #     ccache 基线，命中后编译时间从冷编译的数小时降到增量水平
 #   - 产出：dist/torch-*.whl 上传为 artifact（ppu-wheel-<env>-<commit>，保留 14 天）
 #     下游：ppu_smoke.yml / ppu_accuracy.yml / ppu_perf.yml / ppu_full_ut.yml /
@@ -19,7 +19,7 @@
 #   ppu_refresh_cache.yml 里做。
 #
 # 命中率掉下来了怎么办：
-#   在 v2.11.0 上手动跑一次 ppu_refresh_cache.yml 刷新基线即可，本文件无需改动。
+#   在 v2.11.0-for-ci 上手动跑一次 ppu_refresh_cache.yml 刷新基线即可，本文件无需改动。
 #
 # 编译逻辑不在本文件里：
 #   镜像、PPU SDK、ccache 配置、并行度 / OOM 防护、产物收集等全部在
@@ -33,9 +33,9 @@ name: ppu-linux-build
 
 on:
   pull_request:
-    # 只守 v2.11.0：这是 base 分支过滤，也正好对应能读到的那份缓存作用域
+    # 只守 v2.11.0-for-ci：这是 base 分支过滤，也正好对应能读到的那份缓存作用域
     branches:
-      - v2.11.0
+      - v2.11.0-for-ci
     # 只有可能影响编译产物的变更才触发：纯文档 / 无关脚本的 PR 不再空跑一次编译。
     # 覆盖：C++/CUDA 源码、Python 源码、编译脚本，以及本文件与它调用的可复用 workflow
     # （改这两者本身也要能触发验证），再加上五条下游测试门禁的文件
@@ -55,7 +55,7 @@ on:
       - '.github/workflows/ppu_perf.yml'
       - '.github/workflows/ppu_full_ut.yml'
       - '.github/workflows/ppu_distribute.yml'
-  # 手动触发用于临时出包。注意它同样不回写缓存；且在 topic 分支上跑读不到 v2.11.0 的
+  # 手动触发用于临时出包。注意它同样不回写缓存；且在 topic 分支上跑读不到 v2.11.0-for-ci 的
   # 缓存（兄弟分支作用域不可见），必然冷编译——要种缓存请用 ppu_refresh_cache.yml
   workflow_dispatch:
 

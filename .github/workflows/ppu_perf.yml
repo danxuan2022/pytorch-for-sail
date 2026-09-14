@@ -63,7 +63,7 @@ on:
   # 触发条件必须与 ppu_linux_build.yml 保持一致，改一侧就要同步改另一侧
   pull_request:
     branches:
-      - v2.11.0
+      - v2.11.0-for-ci
     paths:
       - 'aten/**'
       - 'torch/**'

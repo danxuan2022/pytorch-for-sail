@@ -58,7 +58,7 @@ on:
         default: false
   push:
     branches:
-      - v2.11.0
+      - v2.11.0-for-ci
     paths:
       # 匹配的是仓库里的真实路径（下划线），不是上面 name: 里的连字符
       - '.github/workflows/ppu_refresh_cache.yml'
