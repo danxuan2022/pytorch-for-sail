@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # =============================================================================
-# PPU pod 内：安装 ppu-linux-build 编译产出的 torch whl。
+# PPU pod 内：安装 ppu-linux-build-810/890 编译产出的 torch whl。
 #
 # 为什么必须有这一步：
 #   smoke / accuracy 两条门禁改用 PPU 基础镜像（pkg.../ppu:...）后，镜像里只有
 #   PPU SDK 与 triton，没有 torch。被测的 torch 必须是本 PR 的编译产物，否则门禁
 #   测的是镜像里那份与 PR 无关的旧 torch，等于没测。
-#   whl 由 workflow 侧从 ppu-linux-build 的 artifact 下载到 WHEEL_DIR（默认在源码树
+#   whl 由 workflow 侧从 ppu-linux-build-810/890 的 artifact 下载到 WHEEL_DIR（默认在源码树
 #   内），再随源码一起被 ppu-distributed-action 打包送进 pod。
 #
 # 与 install_test_deps.sh 的分工：本脚本只管 torch 本体及其运行时依赖
@@ -32,7 +32,7 @@ if [[ ${#WHLS[@]} -eq 0 ]]; then
     cat >&2 <<EOF
 [wheel][error] 在 $WHEEL_DIR 下找不到 torch-*.whl。
 可能原因：
-  - workflow 侧「下载 ppu-linux-build 产出的 whl」这一步没跑（或下到了别的目录）；
+  - workflow 侧「下载 ppu-linux-build-810/890 产出的 whl」这一步没跑（或下到了别的目录）；
   - ppu-distributed-action 打包源码时漏掉了这个 whl —— 该目录必须在源码树内，
     且不能被 .gitignore 命中（这也是这里用 .ci/ppu/wheelhouse 而不是 dist/ 的原因，
     dist/ 在 .gitignore 里，按 gitignore 过滤的打包方式会把它整个丢掉）。

@@ -1,27 +1,31 @@
-# P1 full UT gate: PPU CUDA 全量单元测试，跑在自建 PPU 集群的单卡 pod 上（多分片并行）。
+# P1 full UT gate（810E 板型）: PPU CUDA 全量单元测试，跑在自建 PPU 集群的单卡 pod 上（多分片并行）。
 #
-# 执行模型（与 ppu_smoke.yml / ppu_accuracy.yml / ppu_perf.yml 一致）：
+# 本文件与 ppu_full_ut_890.yml 互为镜像，只差三处：NODE_SELECTOR（板型）、
+# BUILD_WORKFLOW（等哪条编译流水线）、以及 job / step 名里的板型字样。
+# 其余内容逐字相同 —— 改一侧必须同步另一侧（diff 两个文件即可确认没漂移）。
+#
+# 执行模型（与 ppu_smoke_810.yml / ppu_accuracy_810.yml / ppu_perf_810.yml 一致）：
 #   - job 只在 CPU runner 上做编排：checkout 源码后，由
 #     flytiger-eco/ppu-distributed-action 把源码打包暂存到 NAS，在带 PPU 卡的节点上
 #     拉起 pod，解压到 source_dir，再执行 command。
 #   - 所以 runner 容器只需小体积的 actions-runner 镜像；PPU 发布镜像只在 PPU pod 内
 #     使用，避免 CPU 节点拉大镜像超时。
-#   - runs-on 沿用 ppu_smoke.yml 的 runner 标签，未做任何改动。
+#   - runs-on 沿用 ppu_smoke_810.yml 的 runner 标签，未做任何改动。
 #   - 每个分片一个单卡 pod：nnodes: 0 + nproc_per_node: 1。
 #   - 8 个分片是 8 个**独立 job**（不是一个 matrix job），原因见下面 ut-default-1 上方的
 #     长注释 —— action 的 NAS 暂存路径与 pod 名都只按 github.job 区分。
 #   - pod 内实际逻辑见 .ci/ppu/full_ut_test.sh（含仅 CUDA 的两层过滤与 FP8 排除）。
 #
 # 被测的 torch 从哪来：
-#   - 等 ppu_linux_build.yml 在**同一个 commit** 上编出的 whl → 下载它的 artifact →
+#   - 等 ppu_linux_build_810.yml 在**同一个 commit** 上编出的 whl → 下载它的 artifact →
 #     随源码送进 pod → 在 pod 内 pip install 成功后才跑用例。
-#   - 「等」是轮询 ppu-linux-build 在同一个 head sha 上的 run（这里取 github.sha，
+#   - 「等」是轮询 ppu-linux-build-810 在同一个 head sha 上的 run（这里取 github.sha，
 #     即手动触发时所选 ref 的 tip），而不是用 workflow_run——后者只读默认分支上的
 #     workflow 文件，改本文件的分支上没法自测。
-#   - 因此跑本 workflow 前，所选 ref 上必须已经有一次成功的 ppu-linux-build：
+#   - 因此跑本 workflow 前，所选 ref 上必须已经有一次成功的 ppu-linux-build-810：
 #       * 该 ref 是某个 PR 的源分支时，PR 自动触发的 build 就以分支 tip 作为 head_sha，
 #         直接命中，无需额外操作；
-#       * 否则先在同一 ref 上手动跑一次 ppu_linux_build.yml（它也有 workflow_dispatch）。
+#       * 否则先在同一 ref 上手动跑一次 ppu_linux_build_810.yml（它也有 workflow_dispatch）。
 #         两者先后顺序可以颠倒：先点本 workflow 也行，它会等到 build 出结论为止。
 #     所选 ref 上一次 build 都没有时，会在 WAIT_GRACE_MINUTES 后以明确报错失败。
 #
@@ -30,7 +34,7 @@
 # -----------------------------------------------------------------------------
 # 那两条官方流水线本身只是薄编排层（_linux-build.yml 先编 wheel，_linux-test.yml 再测，
 # 跑在 pytorch 官方云 GPU runner 上，并带 `github.repository_owner == 'pytorch'` 守卫），
-# 这套结构与本仓库「复用 ppu_linux_build.yml 已编好的 whl + 自建 PPU 集群单卡 pod」的
+# 这套结构与本仓库「复用 ppu_linux_build_810.yml 已编好的 whl + 自建 PPU 集群单卡 pod」的
 # 诉求本质互斥，无法照搬其 job / runner 定义。这里复制的是它们的 **test-matrix 语义**：
 #   - periodic.yml 的 linux-jammy-cuda13.0-py3.10-gcc11 里 config: "default"，5 分片
 #   - slow.yml     的 linux-jammy-cuda12.8-py3.10-gcc11-sm86 里 config: "slow"，3 分片
@@ -45,7 +49,7 @@
 #   - jit_legacy(1 分片)：legacy jit executor，恰好是 test_python_shard 用
 #     --exclude-jit-executor 排掉的那批；
 #   - debug-build(7 分片) / slow-gradcheck(8 分片)：需要 debug / slow-gradcheck 两种特殊
-#     编译产物，而本 workflow 复用的是 ppu_linux_build.yml 的常规 release whl，没有这两份包。
+#     编译产物，而本 workflow 复用的是 ppu_linux_build_810.yml 的常规 release whl，没有这两份包。
 #
 # 只跑 CUDA 相关用例 + 过滤 FP8：全部在 .ci/ppu/full_ut_test.sh 里落地，两层过滤——
 #   - 用例级 PYTORCH_TESTING_DEVICE_ONLY_FOR=cuda（官方 CUDA CI 的同一个开关，设备无关的
@@ -56,12 +60,12 @@
 #
 # 触发方式：仅手动（workflow_dispatch）。
 #   全量 UT 是 8 个单卡 pod × 数小时的量级，不适合挂在每个 PR 上自动跑；需要它的时候
-#   在 Actions 页面选一个 ref 手动跑即可。因此本文件不再需要与 ppu_linux_build.yml 对齐
+#   在 Actions 页面选一个 ref 手动跑即可。因此本文件不再需要与 ppu_linux_build_810.yml 对齐
 #   branches / paths（那套约束是为了保证「测试自动触发时编译也一定触发」）。
 #   另外三条门禁（smoke / accuracy / perf）仍是 pull_request 自动门禁，不受本改动影响。
 #   注意：workflow_dispatch 要求本文件已存在于**默认分支**，Actions 页面才会出现
 #   「Run workflow」按钮与 ref 下拉框。
-name: ppu-full-ut
+name: ppu-full-ut-810
 
 on:
   # 手动触发：在 Actions 页面选 ref（分支或标签）。github.sha 即该 ref 的 tip，
@@ -78,12 +82,12 @@ concurrency:
 
 permissions:
   contents: read
-  # 轮询 ppu-linux-build 的 run 状态、以及跨 run 下载它的 whl artifact 都需要
+  # 轮询 ppu-linux-build-810 的 run 状态、以及跨 run 下载它的 whl artifact 都需要
   actions: read
 
 env:
   # PPU 基础镜像：python3.12 + CUDA13 + PPU SDK + triton，不含 torch —— torch 由
-  # ppu-linux-build 的 whl 提供。刻意与 _ppu_build.yml 的 docker-image 默认值用同一个 tag：
+  # ppu-linux-build-810 的 whl 提供。刻意与 _ppu_build.yml 的 docker-image 默认值用同一个 tag：
   # 编译与运行同镜像，才不会出现 whl 与镜像里 SDK / 工具链对不上的问题。
   # 前置要求：该镜像须已预拉到 NODE_SELECTOR 指定板型的节点上，否则 pod 会卡在拉取阶段直至超时。
   IMAGE: pkg.flytiger-eco.com/docker_release/ppu:v2.1.1-cuda13.0-ubuntu24-py312
@@ -91,10 +95,12 @@ env:
   HOST_VOLUMES: "/nas_aisw:/nas_aisw,/wl_nas:/mnt/wl_nas"
   # action 在 pod 内解压源码的路径（也是 action 的默认值，这里显式写出便于 command 引用）
   SOURCE_DIR: /workspace/source
-  # 板型选 890P：集群里 890P 有 16 台（每台 8 PPU），810E 只有 1 台（16 PPU）。
-  # 本 workflow 一次要起 8 个单卡 pod，钉在 810E 会把一条 PR 的全量 UT 全压到同一台机器上，
-  # 和 ppu-smoke / ppu-accuracy / ppu-perf 互相排队。
-  NODE_SELECTOR: "board-type=ZW-M890P"
+  # 本文件是 810E 那一套：被测的是 ppu-linux-build-810 编出的 arch 8.0 whl，必须钉在 810E 上。
+  # 容量现实（本文件最吃亏的一点）：集群里 810E 只有 1 台（16 PPU），而本 workflow 一次要起
+  # 8 个单卡 pod —— 一条 PR 的全量 UT 会全压在这台机器上，还要与 ppu-smoke-810 /
+  # ppu-accuracy-810 / ppu-perf-810 / ppu-distribute-810 互相排队，pod pending 时间可能很长。
+  # （890 那一套没这个问题：890P 有 16 台，每台 8 PPU。）
+  NODE_SELECTOR: "board-type=OAM-810E"
   # 内部 pip 源：pod 内只能访问内网，补装 run_test.py 必需的 pytest 插件要走这个源。
   # 仓库名是 pypi_index（带下划线的 VIRTUAL 仓，聚合 pypi_formal/aliyun/huawei/tsinghua 等代理）。
   # 写成 pypiindex 会命中不存在的仓库，Artifactory 对所有包返回 404，pip 报
@@ -107,7 +113,7 @@ env:
   # 四条测试门禁（smoke 除外）共用同一个版本号，改一侧就要同步改另几侧。
   TRITON_VERSION: "3.6.0"
   # 依赖的编译门禁：按 workflow 文件名找它在同一个 head sha 上的 run
-  BUILD_WORKFLOW: ppu_linux_build.yml
+  BUILD_WORKFLOW: ppu_linux_build_810.yml
   # whl 落地目录（相对源码根）。必须在源码树内，且不能被 .gitignore 命中：
   # 它要靠 ppu-distributed-action 打包源码一起送进 pod，而 dist/ 在 .gitignore 里，
   # 按 gitignore 过滤的打包方式会把它整个丢掉。
@@ -118,7 +124,7 @@ env:
   # 所以这个值必须严格大于 build 自己的 job 上限，否则会出现「build 还在正常编、全量 UT 先
   # 判超时」的假失败：whl 最终编出来了，却没有任何门禁测它，只能手动重跑。
   # 取值 = 350 + 40：
-  #   - 350 是 build 的硬上限（ppu_linux_build.yml 不传 timeout-minutes，取 _ppu_build.yml
+  #   - 350 是 build 的硬上限（ppu_linux_build_810.yml 不传 timeout-minutes，取 _ppu_build.yml
   #     的默认值 350，覆盖冷编译 4~5h 的情况）。改那个默认值必须同步改这里。
   #   - 40 是排队余量：build 的 350 分钟从它真正开始执行才计时，而等待步骤的秒表从 run 创建
   #     就开始跑，等 x86-ubuntu2404-8-32 空闲的 queued 时间只算在本侧。
@@ -143,7 +149,7 @@ jobs:
   # ---------------------------------------------------------------------------
   # 只做一件事：等本 PR 的 whl 编好，把 build 的 run-id 交给下面的测试分片。
   #
-  # 为什么单独拆一个 job（这是与 ppu_smoke.yml 的唯一结构差异）：
+  # 为什么单独拆一个 job（这是与 ppu_smoke_810.yml 的唯一结构差异）：
   #   - 本 workflow 有 8 个测试分片。若把「等待」内联进每个分片（像另外三条门禁那样），
   #     就是 8 份秒表同时轮询 api.github.com 数小时，白烧 GITHUB_TOKEN 的每小时配额；
   #   - 而且那 8 个 job 会在整个编译期间一直占着 k8s-runner-group-cpu-flytiger 的 runner
@@ -153,7 +159,7 @@ jobs:
   #   源码树**，whl 必须落在每个分片的 workspace 内，所以下载仍然是每个分片各做一次。
   # ---------------------------------------------------------------------------
   wait-build:
-    name: 等待 ppu-linux-build
+    name: 等待 ppu-linux-build-810
     runs-on: k8s-runner-group-cpu-flytiger
     container:
       image: ghcr.io/actions/actions-runner:latest
@@ -168,8 +174,8 @@ jobs:
     steps:
       # 本 job 不需要 checkout：github-script 只调 REST API，不读源码。
       #
-      # 下面这段 script 与 ppu_smoke.yml / ppu_accuracy.yml / ppu_perf.yml 的「等待
-      # ppu-linux-build 编译完成」步骤同源，改逻辑必须同步改另三处
+      # 下面这段 script 与 ppu_smoke_810.yml / ppu_accuracy_810.yml / ppu_perf_810.yml 的「等待
+      # ppu-linux-build-810 编译完成」步骤同源，改逻辑必须同步改另三处
       # （diff 这四个文件即可确认没漂移）。只允许两处不同，都是「手动触发 vs PR
       # 门禁」带来的：
       #   - HEAD_SHA：那三条取 PR head sha，本 workflow 取 github.sha；
@@ -182,13 +188,13 @@ jobs:
       # "Can't find 'action.yml' ... Did you forget to run actions/checkout"，即便
       # checkout 成功。改写成 owner/repo/.github/actions/xxx@ref 也不行：uses 不支持
       # 表达式，ref 只能写死，而改 action 的 PR 就没法自测自己那一版。
-      - name: 等待 ppu-linux-build 编译完成
+      - name: 等待 ppu-linux-build-810 编译完成
         id: wait-build
         # 只调 REST API，不占 PPU 卡；pod 要到真正跑用例那一步才拉起
         uses: actions/github-script@v7
         env:
           # workflow_dispatch 下 github.sha 就是所选 ref 的 tip（没有 PR 那种 merge commit），
-          # 而 ppu-linux-build 的 run 无论由 pull_request 还是 workflow_dispatch 创建，head_sha
+          # 而 ppu-linux-build-810 的 run 无论由 pull_request 还是 workflow_dispatch 创建，head_sha
           # 都是被编的那个 commit，所以用它做关联键（也与下面测试分片 checkout 的 ref 一致）。
           # 仍然经 env 传而不在 script 里读 context.payload：ARC + container 下 github-script
           # 读不到 GITHUB_EVENT_PATH 指向的 event.json，payload 会静默变成 {}。
@@ -279,7 +285,7 @@ jobs:
                 core.setFailed(
                   `[wait] 等了 ${waitedMin} 分钟仍找不到 ${workflow} 在 ${headSha} 上的 run。\n` +
                   '本 workflow 是手动触发的，只用所选 ref 上编出来的 whl：请先在同一个 ref 上跑一次 ' +
-                  'ppu_linux_build.yml（Actions → ppu-linux-build → Run workflow），再重跑本 workflow。'
+                  'ppu_linux_build_810.yml（Actions → ppu-linux-build-810 → Run workflow），再重跑本 workflow。'
                 );
                 return;
               } else {
@@ -329,7 +335,7 @@ jobs:
   #   - timeout_minutes，以及 command 里的 UT_CONFIG / SHARD_NUMBER / NUM_TEST_SHARDS
   # ---------------------------------------------------------------------------
   ut-default-1:
-    name: "ppu-full-ut default 1/5 (890P 单卡)"
+    name: "ppu-full-ut default 1/5 (810E 单卡)"
     needs: wait-build
     runs-on: k8s-runner-group-cpu-flytiger
     container:
@@ -353,8 +359,8 @@ jobs:
       # 不需要手动清场（与 whl 不同）：checkout 发现目录里的 .git 无效或 remote 对不上时会
       # 自己清空目录重新 clone，半个 .git 也能被下一次 fetch 续上。
       # 三段的 with: 必须逐字一致，否则重试会签出与第一次不同的东西。
-      # 这五步在本文件 8 个分片里逐字相同（除本分片多了这段注释），也与 ppu_smoke.yml /
-      # ppu_accuracy.yml / ppu_perf.yml / ppu_distribute.yml 里的对应五步等价，只差 ref：
+      # 这五步在本文件 8 个分片里逐字相同（除本分片多了这段注释），也与 ppu_smoke_810.yml /
+      # ppu_accuracy_810.yml / ppu_perf_810.yml / ppu_distribute_810.yml 里的对应五步等价，只差 ref：
       # 那四条是 PR 触发、取 pull_request.head.sha，本文件是手动触发、取 github.sha。
       # -----------------------------------------------------------------------
       - name: Checkout PyTorch
@@ -404,7 +410,7 @@ jobs:
       # 理由），所以前两次 continue-on-error、用 outcome 串成「失败才重试」，最后一次不兜着——
       # 真的连不通就该失败。
       #
-      # 以下四步（下载 ×3 + 校验）与 ppu_smoke.yml / ppu_accuracy.yml / ppu_perf.yml 里的
+      # 以下四步（下载 ×3 + 校验）与 ppu_smoke_810.yml / ppu_accuracy_810.yml / ppu_perf_810.yml 里的
       # 对应步骤等价，只是 run-id 取自 needs.wait-build 而不是本 job 内的 steps.wait-build。
       # -----------------------------------------------------------------------
       - name: 下载 whl artifact
@@ -510,7 +516,7 @@ jobs:
       - name: 删掉 .git（减小 NAS 暂存体积）
         run: rm -rf .git
 
-      - name: "890P 单卡 (1 PPU) CUDA 全量 UT"
+      - name: "810E 单卡 (1 PPU) CUDA 全量 UT"
         uses: flytiger-eco/ppu-distributed-action@main
         with:
           nnodes: 0
@@ -541,7 +547,7 @@ jobs:
   # NUM_TEST_SHARDS / timeout_minutes。步骤为什么这么写（三次下载、清场、校验、删 .git）
   # 全部见 ut-default-1 里的注释，改一处必须同步改这 8 段。
   ut-default-2:
-    name: "ppu-full-ut default 2/5 (890P 单卡)"
+    name: "ppu-full-ut default 2/5 (810E 单卡)"
     needs: wait-build
     runs-on: k8s-runner-group-cpu-flytiger
     container:
@@ -662,7 +668,7 @@ jobs:
       - name: 删掉 .git（减小 NAS 暂存体积）
         run: rm -rf .git
 
-      - name: "890P 单卡 (1 PPU) CUDA 全量 UT"
+      - name: "810E 单卡 (1 PPU) CUDA 全量 UT"
         uses: flytiger-eco/ppu-distributed-action@main
         with:
           nnodes: 0
@@ -685,7 +691,7 @@ jobs:
             bash ${{ env.SOURCE_DIR }}/.ci/ppu/full_ut_test.sh
 
   ut-default-3:
-    name: "ppu-full-ut default 3/5 (890P 单卡)"
+    name: "ppu-full-ut default 3/5 (810E 单卡)"
     needs: wait-build
     runs-on: k8s-runner-group-cpu-flytiger
     container:
@@ -806,7 +812,7 @@ jobs:
       - name: 删掉 .git（减小 NAS 暂存体积）
         run: rm -rf .git
 
-      - name: "890P 单卡 (1 PPU) CUDA 全量 UT"
+      - name: "810E 单卡 (1 PPU) CUDA 全量 UT"
         uses: flytiger-eco/ppu-distributed-action@main
         with:
           nnodes: 0
@@ -829,7 +835,7 @@ jobs:
             bash ${{ env.SOURCE_DIR }}/.ci/ppu/full_ut_test.sh
 
   ut-default-4:
-    name: "ppu-full-ut default 4/5 (890P 单卡)"
+    name: "ppu-full-ut default 4/5 (810E 单卡)"
     needs: wait-build
     runs-on: k8s-runner-group-cpu-flytiger
     container:
@@ -950,7 +956,7 @@ jobs:
       - name: 删掉 .git（减小 NAS 暂存体积）
         run: rm -rf .git
 
-      - name: "890P 单卡 (1 PPU) CUDA 全量 UT"
+      - name: "810E 单卡 (1 PPU) CUDA 全量 UT"
         uses: flytiger-eco/ppu-distributed-action@main
         with:
           nnodes: 0
@@ -973,7 +979,7 @@ jobs:
             bash ${{ env.SOURCE_DIR }}/.ci/ppu/full_ut_test.sh
 
   ut-default-5:
-    name: "ppu-full-ut default 5/5 (890P 单卡)"
+    name: "ppu-full-ut default 5/5 (810E 单卡)"
     needs: wait-build
     runs-on: k8s-runner-group-cpu-flytiger
     container:
@@ -1094,7 +1100,7 @@ jobs:
       - name: 删掉 .git（减小 NAS 暂存体积）
         run: rm -rf .git
 
-      - name: "890P 单卡 (1 PPU) CUDA 全量 UT"
+      - name: "810E 单卡 (1 PPU) CUDA 全量 UT"
         uses: flytiger-eco/ppu-distributed-action@main
         with:
           nnodes: 0
@@ -1117,7 +1123,7 @@ jobs:
             bash ${{ env.SOURCE_DIR }}/.ci/ppu/full_ut_test.sh
 
   ut-slow-1:
-    name: "ppu-full-ut slow 1/3 (890P 单卡)"
+    name: "ppu-full-ut slow 1/3 (810E 单卡)"
     needs: wait-build
     runs-on: k8s-runner-group-cpu-flytiger
     container:
@@ -1238,7 +1244,7 @@ jobs:
       - name: 删掉 .git（减小 NAS 暂存体积）
         run: rm -rf .git
 
-      - name: "890P 单卡 (1 PPU) CUDA 全量 UT"
+      - name: "810E 单卡 (1 PPU) CUDA 全量 UT"
         uses: flytiger-eco/ppu-distributed-action@main
         with:
           nnodes: 0
@@ -1261,7 +1267,7 @@ jobs:
             bash ${{ env.SOURCE_DIR }}/.ci/ppu/full_ut_test.sh
 
   ut-slow-2:
-    name: "ppu-full-ut slow 2/3 (890P 单卡)"
+    name: "ppu-full-ut slow 2/3 (810E 单卡)"
     needs: wait-build
     runs-on: k8s-runner-group-cpu-flytiger
     container:
@@ -1382,7 +1388,7 @@ jobs:
       - name: 删掉 .git（减小 NAS 暂存体积）
         run: rm -rf .git
 
-      - name: "890P 单卡 (1 PPU) CUDA 全量 UT"
+      - name: "810E 单卡 (1 PPU) CUDA 全量 UT"
         uses: flytiger-eco/ppu-distributed-action@main
         with:
           nnodes: 0
@@ -1405,7 +1411,7 @@ jobs:
             bash ${{ env.SOURCE_DIR }}/.ci/ppu/full_ut_test.sh
 
   ut-slow-3:
-    name: "ppu-full-ut slow 3/3 (890P 单卡)"
+    name: "ppu-full-ut slow 3/3 (810E 单卡)"
     needs: wait-build
     runs-on: k8s-runner-group-cpu-flytiger
     container:
@@ -1526,7 +1532,7 @@ jobs:
       - name: 删掉 .git（减小 NAS 暂存体积）
         run: rm -rf .git
 
-      - name: "890P 单卡 (1 PPU) CUDA 全量 UT"
+      - name: "810E 单卡 (1 PPU) CUDA 全量 UT"
         uses: flytiger-eco/ppu-distributed-action@main
         with:
           nnodes: 0

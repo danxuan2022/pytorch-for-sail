@@ -1,0 +1,89 @@
+# =============================================================================
+# PPU torch whl 编译门禁（810E 板型 / arch 8.0）：v2.11.0-for-ci 的 PR 级流水线。
+#
+# 与 ppu_linux_build_890.yml 的唯一区别是 board：810 → TORCH_CUDA_ARCH_LIST=8.0。
+# 两条流水线各自独立地编、各自独立地缓存（cache key 指纹含架构），彼此不复用产物。
+#
+# 定位：
+#   - 触发：针对 v2.11.0-for-ci 的 pull_request（外加 workflow_dispatch 便于临时手动出包）
+#   - 缓存：只读不写 —— restore 本分支 810 基线做增量编译（原因见下）
+#   - 产出：dist/torch-*.whl 上传为 artifact（ppu-wheel-<env>-810-<commit>，保留 14 天）
+#     下游：ppu_smoke_810.yml / ppu_accuracy_810.yml / ppu_perf_810.yml /
+#     ppu_full_ut_810.yml / ppu_distribute_810.yml 会等本流水线完成，下载这份 artifact 到
+#     OAM-810E 板型的 PPU pod 里 pip install 后才跑用例（见那五个文件里的
+#     「等待 ppu-linux-build-810 编译完成」步骤）。因此下面的 branches / paths 必须与那五条
+#     保持一致：只要出现「测试触发了、编译没触发」，那五条就会等到宽限期超时失败。
+#
+# 为什么本流水线不写缓存：
+#   GitHub 缓存的隔离在**作用域（scope）**，不在 key。pull_request 的 run 写出的条目归
+#   refs/pull/<N>/merge，只有同一个 PR 的后续 push / re-run 能读到 —— base 分支和其它
+#   PR 一条都读不到，哪怕 key 与基线一字不差（前缀里本来就没有 PR 标识）。
+#   于是让 PR 回写只能服务它自己，却要占满仓库 10GiB 配额：两份基线已占 8G，再进一两
+#   条冷 PR 就顶破配额，GitHub 按 LRU 淘汰时很可能把共享基线挤掉 —— 结果是所有 PR
+#   下一轮全变 4~5h 冷编译。所以回写这件事完全交给 ppu_refresh_cache.yml：
+#     - 它由定时（每日 00:00）/ push（编译实现、.ci/ppu 脚本合入时）/ 手动触发，
+#       run 跑在分支上，写出的条目对全仓库 PR 可见；
+#     - 它开了 prune-old-ccache，回写前先删同前缀旧条目，保证「每分支 × 每板型
+#       恰好一份」，配额不会膨胀。
+#
+# 命中率掉下来了怎么办：
+#   等 ppu_refresh_cache.yml 跑一次即可（它会同时刷 810 / 890 两份基线），
+#   急用就手动触发一次，本文件无需改动。
+#   注意：同一个 PR 的每个 commit 都从同一份基线起算增量（本流水线不积累缓存），
+#   所以基线越新，整条 PR 的每次编译都越快。
+#
+# 编译逻辑不在本文件里：
+#   镜像、PPU SDK、ccache 配置、并行度 / OOM 防护、产物收集等全部在
+#   .github/workflows/_ppu_build.yml（可复用 workflow）中，与 890 流水线、刷缓存流水线
+#   共用同一份实现。这是保证「几条流水线算出的 cache key 前缀与编译参数完全一致」的前提
+#   ——各写一份 steps 的话，任何一侧漏改都会静默退化成冷编译，日志上只表现为命中率 0。
+#   同理，镜像与「board → 架构」的映射也不在这里写（它们进 cache key 指纹），而是用
+#   _ppu_build.yml 的 input 默认值 / 映射表，改它们只需改那一处。
+# =============================================================================
+name: ppu-linux-build-810
+
+on:
+  pull_request:
+    # 只守 v2.11.0-for-ci：这是 base 分支过滤，也正好对应能读到的那份缓存作用域
+    branches:
+      - v2.11.0-for-ci
+    # 只有可能影响编译产物的变更才触发：纯文档 / 无关脚本的 PR 不再空跑一次编译。
+    # 覆盖：C++/CUDA 源码、Python 源码、编译脚本，以及本文件与它调用的可复用 workflow
+    # （改这两者本身也要能触发验证），再加上五条 810 下游测试门禁的文件
+    # （它们要等本流水线的 whl，必须保证「测试触发了 → 编译也一定触发」）。
+    # 命中缓存后是增量编译，未命中才是冷编译。
+    paths:
+      - 'aten/**'
+      - 'torch/**'
+      - 'c10/**'
+      - 'torchgen/**'
+      - 'setup.py'
+      - '.ci/ppu/**'
+      - '.github/workflows/ppu_linux_build_810.yml'
+      - '.github/workflows/_ppu_build.yml'
+      - '.github/workflows/ppu_smoke_810.yml'
+      - '.github/workflows/ppu_accuracy_810.yml'
+      - '.github/workflows/ppu_perf_810.yml'
+      - '.github/workflows/ppu_full_ut_810.yml'
+      - '.github/workflows/ppu_distribute_810.yml'
+  # 手动触发用于临时出包。在 topic 分支上跑读不到 v2.11.0-for-ci 的缓存（兄弟分支作用域
+  # 不可见），必然冷编译 4~5h，且本流水线不回写，下一次手动跑还是冷的
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/_ppu_build.yml
+    with:
+      # board 是本文件与 890 那条的唯一差异：它同时决定 arch(8.0) 与 cache key / artifact
+      # 名里的板型后缀。镜像 / 环境标识前缀一律不传，用 _ppu_build.yml 的默认值，
+      # 保证与 ppu_refresh_cache.yml 的 810 分支算出同一个 cache key 前缀
+      board: "810"
+      # 不传 save-ccache：默认 false，本流水线只读缓存不回写（原因见文件头）
+      upload-wheel: true

@@ -1,0 +1,437 @@
+# P1 accuracy gate（810E 板型）: PPU Inductor 精度测试，跑在自建 PPU 集群的单卡 pod 上。
+#
+# 本文件与 ppu_accuracy_890.yml 互为镜像，只差三处：NODE_SELECTOR（板型）、
+# BUILD_WORKFLOW（等哪条编译流水线）、paths（盯自己那一套文件）。
+# 其余内容逐字相同 —— 改一侧必须同步另一侧（diff 两个文件即可确认没漂移）。
+#
+# 执行模型（与 ppu_smoke_810.yml 一致）：
+#   - job 只在 CPU runner 上做编排：checkout 源码后，由
+#     flytiger-eco/ppu-distributed-action 把源码打包暂存到 NAS，在带 PPU 卡的节点上
+#     拉起 pod，解压到 source_dir，再执行 command。
+#   - 所以 runner 容器只需小体积的 actions-runner 镜像；PPU 发布镜像只在 PPU pod 内
+#     使用，避免 CPU 节点拉大镜像超时。
+#   - 精度用例只需单卡：nnodes: 0 + nproc_per_node: 1。
+#   - pod 内实际逻辑见 .ci/ppu/accuracy_test.sh（含 include 白名单）。
+#
+# 被测的 torch 从哪来（与 ppu_smoke_810.yml 一致）：
+#   - 等 ppu_linux_build_810.yml 把本 PR 的 whl 编完 → 下载它的 artifact → 随源码送进 pod →
+#     在 pod 内 pip install 成功后才跑用例。inductor 精度用例对 torch 本体的改动极敏感，
+#     用镜像里那份与 PR 无关的 torch 跑精度没有意义。
+#   - 「等」是轮询 ppu-linux-build-810 在同一个 head sha 上的 run，而不是用 workflow_run：
+#     workflow_run 只读默认分支上的 workflow 文件，且它的 run 不会作为 PR 的 check 出现，
+#     当不了 PR 门禁。
+#
+# 设计取舍（重要）：
+#   - inductor.yml 本身只是一个"薄编排层"：它调用 _linux-build.yml（先编 wheel）+ _linux-test.yml，
+#     跑在 pytorch 官方云 GPU runner（linux.g5.4xlarge.nvidia.gpu 等）上，并且带
+#     `if: github.repository_owner == 'pytorch'` 守卫。这套结构（先 build 再 test、云端 runner、
+#     pytorch-only）与本仓库"跳过 build whl + 自建 PPU 集群 + 直接用镜像预装 torch"的诉求
+#     本质互斥，无法照搬其 job/runner 定义。
+#   - 因此这里只保留 inductor.yml 的**测试语义**：对齐其 inductor-test job 跑 CUDA inductor
+#     精度单测（不做 inductor-cpu-test 对应的纯 CPU 一条线），执行机制完全沿用 ppu_smoke_810.yml。
+#   - 测试范围：仅跑 inductor **正确性/精度单测**（python test/run_test.py --include inductor/...），
+#     用 include 白名单精确过滤，天然排除掉非目标用例：
+#       * 分布式/多卡：inductor/test_distributed_patterns、inductor/test_collective_autotuning
+#       * 特殊后端：inductor/test_halide、inductor/test_pallas、inductor/test_triton_cpu_backend、
+#         inductor/*_cpp_wrapper
+#       * H100/B200(SM90/TMA/CUTLASS) 专属：inductor/test_max_autotune、inductor/test_cutedsl_grouped_mm、
+#         inductor/test_cutlass_backend、inductor/test_flex_attention 的 TMA 用例
+#         （真武 PPU 不适用，与 ppu_smoke_810.yml 的裁剪保持一致）
+#       * FP8：inductor/test_fp8（真武 PPU 当前不支持 FP8，同步从 ppu_smoke_810.yml 里去掉了
+#         test_scaled_matmul_cuda / inductor/test_fp8）
+#   - 设备覆盖：只跑 CUDA 一条线（PPU 设备可见）。
+#   - 触发方式：与 ppu_smoke_810.yml 一致，仅 pull_request（作为 PR 门禁），且 branches / paths 必须
+#     与 ppu_linux_build_810.yml 完全对齐 —— 本 workflow 要等它的 whl，两边过滤不一致就会出现
+#     「精度流水线触发了、但那个 PR 根本没编包」→ 永远等不到 whl。
+#     不沿用 inductor.yml 的 push-to-main + repository_owner=='pytorch' 守卫（那是官方仓库专用）。
+#     注意：pull_request 事件读取的是**默认分支**上的 workflow 文件，本文件需先合入默认分支才会对新 PR 生效。
+name: ppu-accuracy-810
+
+on:
+  # 触发条件必须与 ppu_linux_build_810.yml 保持一致，改一侧就要同步改另一侧
+  pull_request:
+    branches:
+      - v2.11.0-for-ci
+    paths:
+      - 'aten/**'
+      - 'torch/**'
+      - 'c10/**'
+      - 'torchgen/**'
+      - 'setup.py'
+      - '.ci/ppu/**'
+      - '.github/workflows/ppu_linux_build_810.yml'
+      - '.github/workflows/_ppu_build.yml'
+      - '.github/workflows/ppu_accuracy_810.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  # 轮询 ppu-linux-build-810 的 run 状态、以及跨 run 下载它的 whl artifact 都需要
+  actions: read
+
+env:
+  # PPU 基础镜像：python3.12 + CUDA13 + PPU SDK + triton，不含 torch —— torch 由
+  # ppu-linux-build-810 的 whl 提供。刻意与 _ppu_build.yml 的 docker-image 默认值用同一个 tag：
+  # 编译与运行同镜像，才不会出现 whl 与镜像里 SDK / 工具链对不上的问题。
+  # 前置要求：该镜像须已预拉到 NODE_SELECTOR 指定板型的节点上，否则 pod 会卡在拉取阶段直至超时。
+  IMAGE: pkg.flytiger-eco.com/docker_release/ppu:v2.1.1-cuda13.0-ubuntu24-py312
+  NAMESPACE: ppu-sched
+  HOST_VOLUMES: "/nas_aisw:/nas_aisw,/wl_nas:/mnt/wl_nas"
+  # action 在 pod 内解压源码的路径（也是 action 的默认值，这里显式写出便于 command 引用）
+  SOURCE_DIR: /workspace/source
+  # 本文件是 810E 那一套：被测的是 ppu-linux-build-810 编出的 arch 8.0 whl，必须钉在 810E 上。
+  # 容量现实：集群里 810E 只有 1 台（16 PPU），890P 有 16 台（每台 8 PPU）。本门禁耗时长，
+  # 会与 ppu-smoke-810 / ppu-perf-810 / ppu-full-ut-810 挤在同一台机器上排队，表现为
+  # pod 长时间 pending（而不是用例失败）。
+  NODE_SELECTOR: "board-type=OAM-810E"
+  # 内部 pip 源：pod 内只能访问内网，补装 run_test.py 必需的 pytest 插件要走这个源。
+  # 仓库名是 pypi_index（带下划线的 VIRTUAL 仓，聚合 pypi_formal/aliyun/huawei/tsinghua 等代理）。
+  # 写成 pypiindex 会命中不存在的仓库，Artifactory 对所有包返回 404，pip 报
+  # "Could not find a version that satisfies the requirement ... (from versions: none)"。
+  PIP_INDEX: https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple
+  # inductor 精度用例的 codegen 全靠 triton，必须钉到内部源上适配 PPU 的那一版：镜像自带的
+  # triton 版本不保证与本 PR 的 torch 匹配。accuracy_test.sh 只会从下面 command 里传的
+  # TRITON_INDEX（= PIP_INDEX，即 pypi_index 仓）装它，不做多源回退、也不退回镜像默认源，
+  # 所以改这个版本号前请先确认该版本在那个仓上确实存在，否则此步直接失败。
+  TRITON_VERSION: "3.6.0"
+  # 依赖的编译门禁：按 workflow 文件名找它在同一个 head sha 上的 run
+  BUILD_WORKFLOW: ppu_linux_build_810.yml
+  # whl 落地目录（相对源码根）。必须在源码树内，且不能被 .gitignore 命中：
+  # 它要靠 ppu-distributed-action 打包源码一起送进 pod，而 dist/ 在 .gitignore 里，
+  # 按 gitignore 过滤的打包方式会把它整个丢掉。
+  WHEEL_DIR_REL: .ci/ppu/wheelhouse
+  # 等 build 的上限。这是**兜底**而不是正常退出路径：正常情况下等待由 build run 自己的结论
+  # 终止 —— 编译成功就往下走；编译失败、或它自己撞上 job 超时（GitHub 记成
+  # conclusion=failure），都会立刻命中下面的「未成功」分支快速失败。
+  # 所以这个值必须严格大于 build 自己的 job 上限，否则会出现「build 还在正常编、精度门禁先
+  # 判超时」的假失败：whl 最终编出来了，却没有任何门禁测它，只能手动重跑。
+  # 取值 = 350 + 40：
+  #   - 350 是 build 的硬上限（ppu_linux_build_810.yml 不传 timeout-minutes，取 _ppu_build.yml
+  #     的默认值 350，覆盖冷编译 4~5h 的情况）。改那个默认值必须同步改这里。
+  #   - 40 是排队余量：build 的 350 分钟从它真正开始执行才计时，而本步骤的秒表从 run 创建
+  #     就开始跑，等 x86-ubuntu2404-8-32 空闲的 queued 时间只算在本侧。
+  # 等待发生在自建 CPU runner 上（不占 PPU 卡），pod 要到真正跑用例那一步才拉起。
+  WAIT_TIMEOUT_MINUTES: "390"
+  WAIT_POLL_SECONDS: "60"
+  # 「一个 build run 都还没出现」的宽限期：正常情况下两条 workflow 由同一事件同时创建，
+  # 秒级就能查到。超过这个时间还查不到，基本就是两边触发条件不一致，早失败早暴露。
+  WAIT_GRACE_MINUTES: "15"
+  # 轮询期间容忍的「连续」查询失败次数。自建 runner 出网走代理，调 api.github.com 偶发
+  # `RequestError: fetch failed`（octokit 把网络层错误一律记成 status 500）。轮询要持续
+  # 几小时、几百次请求，一次抖动就让整个 job 白等是不可接受的，所以只在连续失败到这个
+  # 次数（× WAIT_POLL_SECONDS ≈ 10 分钟持续不通）才判定为真故障。查询成功即清零。
+  WAIT_MAX_API_FAILURES: "10"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # CUDA/PPU 侧 inductor 精度单测（对齐 inductor.yml 的 inductor-test job）
+  # ---------------------------------------------------------------------------
+  ppu-accuracy-cuda:
+    name: ppu-accuracy-cuda (810E 单卡)
+    runs-on: k8s-runner-group-cpu-flytiger
+    container:
+      image: ghcr.io/actions/actions-runner:latest
+    # = 等 build 的上限(390) + 用例超时(120) + checkout/下载 whl/pod 启动与打包余量(30)。
+    # 必须大于 WAIT_TIMEOUT_MINUTES：否则秒表还没到点、job 先被砍，日志里只剩一条没有
+    # 任何原因说明的 job 超时。命中缓存时实际远低于此。
+    # 注：6 小时 job 上限只约束 GitHub 托管 runner，本 job 在自建 ARC runner 上不受该限制。
+    timeout-minutes: 540
+
+    steps:
+      # -----------------------------------------------------------------------
+      # checkout 写成三次尝试，与下面「下载 whl artifact」同一个套路、同一个理由：
+      # 本 job 跑在自建 ARC runner 上、出网走代理，git clone 与 artifact 下载撞的是同一类
+      # 网络故障（tunneling socket could not be established / getaddrinfo ENOTFOUND <proxy>，
+      # 以及 fetch 中途 "RPC failed; curl transfer closed"）。一次抖动就把门禁判红、要人手动
+      # 重跑是不可接受的：本 job 后面还要等几小时编译，重跑等于再等一轮。
+      # GHA 的 step 没有 retry 键（只有 continue-on-error / timeout-minutes），想重试一个
+      # uses 步骤就只能再写一个 step，upstream 的 .github/actions/checkout-pytorch/action.yml
+      # 也是这么干的（那个 action 在 ARC + container 下用不了，见下面 composite action 那段注释）。
+      # 不需要手动清场（与 whl 不同）：checkout 发现目录里的 .git 无效或 remote 对不上时会
+      # 自己清空目录重新 clone，半个 .git 也能被下一次 fetch 续上。
+      # 三段的 with: 必须逐字一致，否则重试会签出与第一次不同的东西。
+      # 以下五步在 ppu_smoke_810.yml / ppu_accuracy_810.yml / ppu_perf_810.yml / ppu_distribute_810.yml 里逐字
+      # 相同，改一处必须同步改另三处（ppu_full_ut_810.yml 的 8 个分片只差 ref 取 github.sha）。
+      # -----------------------------------------------------------------------
+      - name: Checkout PyTorch
+        id: checkout
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          # 签出 PR head commit（github.sha 在 PR 场景是 merge commit），保证测试代码与 PR 一致
+          ref: ${{ github.event.pull_request.head.sha }}
+          # 只跑 python 测试，不需要 third_party 子模块；浅克隆加速，也减小传到 NAS 的包体积
+          fetch-depth: 1
+
+      - name: 重试前等待 (checkout 1)
+        if: steps.checkout.outcome == 'failure'
+        # 等代理 / DNS 缓过来再试，立即重试大概率撞上同一个故障窗口
+        run: sleep 15
+
+      - name: Checkout PyTorch (重试 1)
+        id: checkout-retry-1
+        if: steps.checkout.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+
+      - name: 重试前等待 (checkout 2)
+        if: steps.checkout.outcome == 'failure' && steps.checkout-retry-1.outcome == 'failure'
+        run: sleep 15
+
+      # 最后一次：不加 continue-on-error，真的连不通就该失败
+      - name: Checkout PyTorch (重试 2)
+        if: steps.checkout.outcome == 'failure' && steps.checkout-retry-1.outcome == 'failure'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+
+      # -----------------------------------------------------------------------
+      # 等本 PR 的 whl 编好 → 下载到源码树内 → 校验。以下三步在 ppu_smoke_810.yml /
+      # ppu_accuracy_810.yml / ppu_perf_810.yml / ppu_distribute_810.yml 里逐字相同，改一处必须同步
+      # 改另三处（diff 这四个文件即可确认没漂移）。
+      # ppu_full_ut_810.yml 把「等待」拆成了独立 job（给 8 个分片共用），但它的
+      # github-script 脚本与下面那一段也是逐字相同的，改这里同样要同步改它。
+      #
+      # 为什么不抽成 composite action：本 job 跑在 ARC(Actions Runner Controller) 自建
+      # runner 上且带 container，ARC 的 k8s hook 把 workspace 拷进 job 容器，runner 进程
+      # 自己看不到 checkout 的结果 —— `uses: ./.github/actions/xxx` 必然报
+      # "Can't find 'action.yml' ... Did you forget to run actions/checkout"，即便
+      # checkout 成功。改写成 owner/repo/.github/actions/xxx@ref 也不行：uses 不支持
+      # 表达式，ref 只能写死，而改 action 的 PR 就没法自测自己那一版。
+      # -----------------------------------------------------------------------
+      - name: 等待 ppu-linux-build-810 编译完成
+        id: wait-build
+        # 只调 REST API，不占 PPU 卡；pod 要到真正跑用例那一步才拉起
+        uses: actions/github-script@v7
+        env:
+          # head sha 必须用表达式经 env 传进来，不能在脚本里读
+          # context.payload.pull_request：表达式由 runner 求值，而 context.payload 是
+          # github-script 在容器内读 GITHUB_EVENT_PATH 指向的 event.json —— ARC 把
+          # workspace 拷进容器后那个文件在容器里读不到，payload 会静默变成 {}，
+          # 于是报 "TypeError: Cannot read properties of undefined (reading 'head')"。
+          # （context.repo 不受影响：它读的是 GITHUB_REPOSITORY 环境变量。）
+          # pull_request 事件下 github.sha 是 merge commit，而两条 workflow 的 run 都以
+          # PR head commit 作为 head_sha，所以用它做关联键（也与上面 checkout 的 ref 一致）
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        with:
+          # 单次请求内部也重试（octokit retry 插件），先扛掉最短的网络抖动；
+          # 连续多轮都失败才由下面的 apiFailures 计数判定为真故障。
+          retries: 3
+          script: |
+            const workflow = process.env.BUILD_WORKFLOW;
+            const headSha = process.env.HEAD_SHA;
+            const pollMs = Number(process.env.WAIT_POLL_SECONDS) * 1000;
+            const timeoutMs = Number(process.env.WAIT_TIMEOUT_MINUTES) * 60 * 1000;
+            const graceMs = Number(process.env.WAIT_GRACE_MINUTES) * 60 * 1000;
+            const maxApiFailures = Number(process.env.WAIT_MAX_API_FAILURES);
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const startedAt = Date.now();
+            let apiFailures = 0;
+
+            core.info(`[wait] 目标: ${workflow} @ head_sha=${headSha}`);
+            while (true) {
+              const waited = Date.now() - startedAt;
+              const waitedMin = Math.round(waited / 60000);
+
+              // 超时判定放在循环开头：下面查询失败时会 continue，放在尾部会被跳过
+              if (waited > timeoutMs) {
+                core.setFailed(
+                  `[wait] 超时：等 ${workflow} 超过 ${process.env.WAIT_TIMEOUT_MINUTES} 分钟仍无结论。` +
+                  '这个上限已高于 build 自己的 job 超时，所以「编译慢」不会走到这里：' +
+                  '大概率那个 run 长期卡在 queued（没有空闲编译 runner）。'
+                );
+                return;
+              }
+
+              let runs;
+              try {
+                const { data } = await github.rest.actions.listWorkflowRuns({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  workflow_id: workflow,
+                  head_sha: headSha,
+                  per_page: 20,
+                });
+                runs = data.workflow_runs;
+                apiFailures = 0;
+              } catch (error) {
+                // 不能让单次网络抖动掀掉整个 job：那意味着已经等掉的几小时编译白费，
+                // 且 PR 门禁会以一个与被测代码无关的原因变红。
+                apiFailures += 1;
+                if (apiFailures >= maxApiFailures) {
+                  core.setFailed(
+                    `[wait] 连续 ${apiFailures} 次查询 ${workflow} 的 run 失败，放弃等待：` +
+                    `${error.status || ''} ${error.message}\n` +
+                    'runner 到 api.github.com 的网络（出网代理）大概率有问题，不是编译本身失败。'
+                  );
+                  return;
+                }
+                core.warning(
+                  `[wait] 查询 run 失败（连续第 ${apiFailures}/${maxApiFailures} 次），` +
+                  `${process.env.WAIT_POLL_SECONDS}s 后重试: ${error.status || ''} ${error.message}`
+                );
+                await sleep(pollMs);
+                continue;
+              }
+
+              // 同一个 sha 上可能既有 pull_request 触发的 run、又有手动触发 / 重跑的，
+              // 只要有一次成功就能拿到可用的 whl
+              const ok = runs.find((r) => r.status === 'completed' && r.conclusion === 'success');
+              if (ok) {
+                core.info(`[wait] 编译已成功（等待 ${waitedMin} 分钟）: ${ok.html_url}`);
+                core.setOutput('run-id', String(ok.id));
+                core.setOutput('run-url', ok.html_url);
+                return;
+              }
+
+              const pending = runs.find((r) => r.status !== 'completed');
+              if (pending) {
+                core.info(`[wait] 编译中 (${pending.status})，已等 ${waitedMin} 分钟: ${pending.html_url}`);
+              } else if (runs.length > 0) {
+                // 全部 completed 且无一成功：再等下去也不会有 whl，直接失败
+                core.setFailed(
+                  `[wait] ${workflow} 未成功（conclusion=${runs[0].conclusion}）: ${runs[0].html_url}\n` +
+                  '没有可用的 whl。先修好编译，再重跑本 workflow。'
+                );
+                return;
+              } else if (waited > graceMs) {
+                core.setFailed(
+                  `[wait] 等了 ${waitedMin} 分钟仍找不到 ${workflow} 在 ${headSha} 上的 run。\n` +
+                  '最常见原因：本 workflow 与 ppu_linux_build_810.yml 的 branches / paths 过滤不一致，' +
+                  '导致这个 PR 只触发了测试、没触发编译。'
+                );
+                return;
+              } else {
+                core.info(`[wait] 还没查到 build run，宽限期内继续等（已等 ${waitedMin} 分钟）`);
+              }
+
+              await sleep(pollMs);
+            }
+
+      # 下载分三次写：download-artifact 没有 retries 输入（github-script 的 retries 只作用于
+      # 上面那一步），而这一步要跨 run 拉一个几百 MB 的 zip，自建 runner 出网走代理，偶发
+      #   Unable to download artifact(s): ... tunneling socket could not be established,
+      #   cause=getaddrinfo ENOTFOUND <proxy>
+      # 也就是代理域名一时解析不出来。走到这一步时已经等掉了几小时编译，为一次 DNS 抖动把
+      # 门禁判红、要人手动重跑是不可接受的（与上面 apiFailures 容忍连续失败同一个理由），
+      # 所以前两次 continue-on-error、用 outcome 串成「失败才重试」，最后一次不兜着——
+      # 真的连不通就该失败。
+      - name: 下载 whl artifact
+        id: download-wheel
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          # artifact 名形如 ppu-wheel-<env>-<commit>（见 _ppu_build.yml 的 Collect wheel 步骤），
+          # 这里按前缀取，不在两边各写一份命名规则
+          pattern: ppu-wheel-*
+          merge-multiple: true
+          path: ${{ env.WHEEL_DIR_REL }}
+          # 跨 run 下载必须显式给 run-id + token（默认只在当前 run 内找）
+          run-id: ${{ steps.wait-build.outputs.run-id }}
+          github-token: ${{ github.token }}
+
+      - name: 重试前清场 (1)
+        if: steps.download-wheel.outcome == 'failure'
+        env:
+          WHEEL_DIR: ${{ env.WHEEL_DIR_REL }}
+        run: |
+          # v4 是边下边解压的，中途断掉可能留下一个截断的 whl；不清掉的话重试后
+          # 「校验 whl」可能数到一个坏包，等到 pod 里 pip install 才炸（那时已占着 PPU 卡）。
+          rm -rf "${WHEEL_DIR}"
+          # 等代理 / DNS 缓过来再试，立刻重试大概率撞上同一个故障窗口
+          sleep 30
+
+      - name: 下载 whl artifact (重试 1)
+        id: download-wheel-retry-1
+        if: steps.download-wheel.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ppu-wheel-*
+          merge-multiple: true
+          path: ${{ env.WHEEL_DIR_REL }}
+          run-id: ${{ steps.wait-build.outputs.run-id }}
+          github-token: ${{ github.token }}
+
+      - name: 重试前清场 (2)
+        if: steps.download-wheel.outcome == 'failure' && steps.download-wheel-retry-1.outcome == 'failure'
+        env:
+          WHEEL_DIR: ${{ env.WHEEL_DIR_REL }}
+        run: |
+          rm -rf "${WHEEL_DIR}"
+          sleep 60
+
+      # 最后一次：不加 continue-on-error，失败就让 job 红，报错原文即上面那条 ENOTFOUND
+      - name: 下载 whl artifact (重试 2)
+        if: steps.download-wheel.outcome == 'failure' && steps.download-wheel-retry-1.outcome == 'failure'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ppu-wheel-*
+          merge-multiple: true
+          path: ${{ env.WHEEL_DIR_REL }}
+          run-id: ${{ steps.wait-build.outputs.run-id }}
+          github-token: ${{ github.token }}
+
+      - name: 校验 whl
+        env:
+          # 用相对路径：${{ github.workspace }} 求值出的是 runner 自己的路径
+          # (/home/runner/_work/...)，而本步骤跑在 container 里看到的是挂载点 (/__w/...)
+          WHEEL_DIR: ${{ env.WHEEL_DIR_REL }}
+          BUILD_RUN_URL: ${{ steps.wait-build.outputs.run-url }}
+        run: |
+          # 卡在这里，而不是等 pod 起来才发现没包 —— 那时已经占着 PPU 卡了
+          # 本步骤在 actions-runner 容器里跑，容器无 bash，默认 shell 会回退到 sh：
+          # 不能用 shopt / 数组 / [[ ]] 等 bash 专有语法，一律改成 POSIX sh 写法。
+          count=0
+          wheel=""
+          for f in "${WHEEL_DIR}"/torch-*.whl; do
+            # glob 无匹配时 sh 会原样保留模式字符串，用 -e 过滤掉这个不存在的字面量（等价 nullglob）
+            [ -e "$f" ] || continue
+            count=$((count + 1))
+            wheel="$f"
+          done
+          if [ "$count" -ne 1 ]; then
+            echo "::error::期望 ${WHEEL_DIR} 下恰好 1 个 torch-*.whl，实际 ${count} 个"
+            ls -la "${WHEEL_DIR}" 2>/dev/null || echo "（目录不存在）"
+            exit 1
+          fi
+          wheel_name=$(basename "$wheel")
+          echo "[wheel] ${wheel_name} ($(du -h "$wheel" | cut -f1))"
+          {
+            echo "### 被测 whl"
+            echo ""
+            echo "- 包: \`${wheel_name}\`"
+            echo "- 来源: ${BUILD_RUN_URL}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: "810E 单卡 (1 PPU) CUDA inductor 精度单测"
+        uses: flytiger-eco/ppu-distributed-action@main
+        with:
+          nnodes: 0
+          nproc_per_node: 1
+          node_selector: ${{ env.NODE_SELECTOR }}
+          host_volumes: ${{ env.HOST_VOLUMES }}
+          image: ${{ env.IMAGE }}
+          namespace: ${{ env.NAMESPACE }}
+          source_dir: ${{ env.SOURCE_DIR }}
+          timeout_minutes: 120
+          # 环境变量必须在 command 里注入：job 级 env 不会传进 PPU pod。
+          # 脚本自身会 cd 到源码根目录，所以这里只给绝对路径即可。
+          # WHEEL_DIR 指向上面下载的 whl（已随源码被 action 打包到 pod 的 source_dir 下）。
+          command: |
+            PR_NUMBER="${{ github.event.pull_request.number }}" \
+            WHEEL_DIR="${{ env.SOURCE_DIR }}/${{ env.WHEEL_DIR_REL }}" \
+            SDK_INSTALL_DIR="/usr/local" \
+            PIP_INDEX="${{ env.PIP_INDEX }}" \
+            TRITON_INDEX="${{ env.PIP_INDEX }}" \
+            TRITON_VERSION="${{ env.TRITON_VERSION }}" \
+            bash ${{ env.SOURCE_DIR }}/.ci/ppu/accuracy_test.sh
+            
+
