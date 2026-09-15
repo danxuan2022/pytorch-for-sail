@@ -8,7 +8,7 @@
 #   这里，调用方只传参、不复制 steps。
 #
 # 当前调用方（每种板型一条 PR 流水线，靠 board 区分）：
-#   - ppu_refresh_cache.yml     : 定时 / push / 手动，矩阵跑 board=810/890，save-ccache=true
+#   - ppu_refresh_cache.yml     : push / 手动，矩阵跑 board=810/890，save-ccache=true
 #   - ppu_linux_build_810.yml   : PR 触发，board=810（arch 8.0），只读缓存
 #   - ppu_linux_build_890.yml   : PR 触发，board=890（arch 8.9），只读缓存
 #
@@ -19,8 +19,8 @@
 #     哪怕 key 与基线一字不差（前缀里本来就没有 PR 标识）。让 PR 回写只能服务它自己，
 #     却要占满仓库 10GiB 配额，GitHub 按 LRU 淘汰时很可能把共享基线挤掉，反而让所有 PR
 #     下一轮全变冷编译。
-#   - 因此 save-ccache=true 只给 ppu_refresh_cache.yml：它由定时 / push 触发，跑在分支上，
-#     写出的条目对全仓库 PR 可见，就是「跨 PR 共享」的那唯一一份基线。
+#   - 因此 save-ccache=true 只给 ppu_refresh_cache.yml：它由 push / 手动触发，跑在分支上，
+#     写出的条目对以该分支为 base 的 PR 可见，就是「跟 PR 共享」的那唯一一份基线。
 #   （可自证的观察点：下面 Report repo cache usage 跑的 gh cache list 是仓库级的，能列出
 #    所有条目并带 REF 列 —— 能列出 ≠ 能 restore。）
 # =============================================================================
@@ -34,8 +34,8 @@ on:
       # 所以调用方只传一个 board，「board → 环境标识后缀 / 目标架构」的映射只在这一份
       # 文件里：若让 PR 流水线与刷缓存矩阵各写一份 arch，任何一侧漏改都会让两边算出
       # 不同前缀，PR 静默地退化成 4~5h 冷编译，日志上只表现为「命中率 0」。
-      # 改镜像 / 改架构映射就改这里，所有流水线一起动（旧缓存自动失效，等下一次
-      # ppu_refresh_cache.yml 的定时任务重种，或手动触发一次）。
+      # 改镜像 / 改架构映射就改这里，所有流水线一起动（旧缓存自动失效，合入后
+      # ppu_refresh_cache.yml 的 push 触发会重种，也可手动触发一次）。
       board:
         description: |
           板型：810 或 890。它单手决定目标架构（810 → 8.0，890 → 8.9），
@@ -52,13 +52,13 @@ on:
         default: pkg.flytiger-eco.com/docker_release/ppu:v2.1.1-cuda13.0-ubuntu24-py312
       # ---- 以下不影响 cache key，调用方可自由覆盖 ----
       source-ref:
-        description: 要编译的 ref；留空 = PR head sha / 当前 ref。定时刷缓存靠它指定目标分支
+        description: 要编译的 ref；留空 = PR head sha / 当前 ref。刷缓存时靠它指定目标分支
         type: string
         default: ""
       cache-branch:
         description: |
           cache key 里的分支名；留空 = PR base 分支 / 当前 ref。
-          只在定时刷缓存时显式传，且必须与 source-ref 指的分支一致，否则种出的基线
+          只在给别的分支刷缓存时显式传，且必须与 source-ref 指的分支一致，否则种出的基线
           与 PR 侧算出的前缀对不上（PR 侧永远用它的 base 分支名）
         type: string
         default: ""
@@ -198,7 +198,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           # 默认拉 PR 内容：显式签出 head commit，保证 stamp / ccache / artifact 键与源码一一对应。
-          # source-ref 非空时以它为准（定时刷缓存跑在默认分支上，要编的却是目标分支）
+          # source-ref 非空时以它为准（给别的分支刷缓存时，要编的是目标分支而非当前 ref）
           ref: ${{ inputs.source-ref || github.event.pull_request.head.sha || github.sha }}
           # 源码编译必须带 third_party 子模块
           submodules: recursive
@@ -247,8 +247,8 @@ jobs:
         id: cache-meta
         env:
           # PR 按 base 分支取缓存（如 v2.11.0-for-ci）；手动触发时就是 UI 上选中的分支。
-          # cache-branch 非空时以它为准：定时刷缓存的 run 跑在默认分支上（schedule 只能在
-          # 默认分支触发），ref_name 并不是它要服务的那个分支，不覆盖就会种出一份
+          # cache-branch 非空时以它为准：在一个分支上手动跑、却想给另一个分支种基线时，
+          # ref_name 并不是它要服务的那个分支，不覆盖就会种出一份
           # PR 永远对不上前缀的缓存。
           # 注意分支作用域限制：在 topic 分支上手动跑本流水线读不到 v2.11.0 的缓存
           # （兄弟分支不可见），必然冷编译，这是预期行为
@@ -330,7 +330,7 @@ jobs:
             # PR 侧不会回写（作用域原因见文件头），所以这里只能靠刷缓存流水线补
             echo "[cache] 未命中任何 ccache → 本轮冷编译（全部 miss）"
             echo "[cache] 若目标分支上还没种过缓存，等 ppu_refresh_cache.yml 跑一次即可"
-            echo "[cache]       （每日定时 / 编译实现或 .ci/ppu 合入时 push 触发 / 也可手动触发）"
+            echo "[cache]       （编译实现或 .ci/ppu 合入时 push 触发 / 也可手动触发）"
           else
             echo "[cache] 命中 ${MATCHED_KEY}"
             du -sh "${RUNNER_TEMP}/ppu-ccache" || true
@@ -648,7 +648,7 @@ jobs:
           echo "[cache]       一条都读不到（与 key 叫什么无关），只会白占 10GiB 仓库配额，"
           echo "[cache]       还可能把共享基线按 LRU 挤掉。"
           echo "[cache] ${CACHE_BRANCH} 的跨 PR 共享基线由 ppu_refresh_cache.yml 独家维护"
-          echo "[cache]       （每日定时 + 编译实现/脚本合入时 push 触发 + 可手动触发）。"
+          echo "[cache]       （编译实现/脚本合入时 push 触发 + 可手动触发）。"
 
       - name: Report repo cache usage
         if: ${{ always() && inputs.save-ccache }}
