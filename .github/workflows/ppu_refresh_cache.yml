@@ -4,7 +4,7 @@
 # 用途：
 #   在目标分支上跑完整编译，把两种板型（arch 8.0 / 8.9）的 ccache 基线各种一份进
 #   GitHub Actions Cache，之后该分支上的 PR 编译流水线
-#   （ppu_linux_build_810.yml / ppu_linux_build_890.yml）restore 这份基线做增量编译。
+#   （ppu_ci_810.yml / ppu_ci_890.yml）restore 这份基线做增量编译。
 #   本流水线不产出对外的 whl（upload-wheel=false），它的产出就是缓存本身。
 #
 # 为什么共享基线只能由本流水线写（全仓库只此一处回写）：
@@ -20,7 +20,7 @@
 # 与 PR 流水线的分工：
 #   - 本流水线：唯一的写入方，save-ccache=true + prune-old-ccache=true，维护「每分支 ×
 #     每板型恰好一份」基线。
-#   - PR 流水线（ppu_linux_build_810/890.yml）：只读，一律不回写。
+#   - PR 流水线（ppu_ci_810/890.yml 的 build job）：只读，一律不回写。
 #   → 所以本流水线停了不会立即挂门禁，但基线一旧，所有 PR 的每次编译都变慢；
 #     基线被淘汰或从未种过时，每条 PR 的每个 commit 都是 4~5h 冷编译。
 #     另：GitHub 会自动删除 7 天未被访问的条目，而 PR 流水线的 restore 也算一次访问 ——

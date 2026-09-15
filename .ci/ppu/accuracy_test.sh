@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # =============================================================================
 # PPU pod 内：CUDA inductor 精度测试入口。
-# 由 .github/workflows/ppu-accuracy.yml 经 flytiger-eco/ppu-distributed-action
+# 由 .github/workflows/ppu_ci_810/890.yml 的 accuracy job 经 flytiger-eco/ppu-distributed-action
 # 在单卡 PPU pod 内执行（源码已由 action 解压到 pod 的 source_dir）。
 #
 # 单独抽成脚本而不是内联到 yaml 的 command：command 由 pod 的默认 shell 执行，
 # 未必是 bash，而 sdk_env.sh 依赖 bash 语法（[[ ]] / BASH_SOURCE）且必须被 source。
 #
-# torch 来自 ppu-linux-build-810/890 编译产出的 whl（workflow 侧已下载到 WHEEL_DIR，随源码一起
+# torch 来自 ppu-ci-810/890 的 build job 编译产出的 whl（workflow 侧已下载到 WHEEL_DIR，随源码一起
 # 送进 pod），由 install_wheel.sh 安装：跑的是 PPU 基础镜像，镜像里没有 torch，
 # 门禁必须测本 PR 编出来的那一份。
 #
@@ -32,7 +32,7 @@ echo "[accuracy] 源码目录: $(pwd)"
 # 也必须放在装 torch 之前 —— import torch 要能找到 SDK 里的运行时库。
 source .ci/ppu/sdk_env.sh
 
-# 安装被测的 torch：本 PR 由 ppu_linux_build_810/890.yml 编出来的 whl
+# 安装被测的 torch：本 PR 由 ppu_ci_810/890.yml 的 build job 编出来的 whl
 bash .ci/ppu/install_wheel.sh
 
 # inductor 用例的 codegen 后端：钉版本、且只从内部源装（理由见 install_triton.sh 头注释）。
@@ -76,7 +76,7 @@ echo "=== CUDA inductor 精度单测（run_test.py --include 白名单过滤，�
 # 改名而来，内容仍是 GPU 版 select_algorithm（instantiate_device_type_tests 的
 # only_for=("cuda","xpu")），在 PPU 上跑的仍是 cuda 那一半。
 # FP8：inductor/test_fp8 已移除——真武 PPU 当前不支持 FP8，该文件全量为 FP8 语义，
-# 与 ppu_smoke_810/890.yml 的裁剪保持一致；PPU 支持 FP8 后再加回来。
+# 与 ppu_ci_810/890.yml 的 smoke job 的裁剪保持一致；PPU 支持 FP8 后再加回来。
 # 不使用 --upload-artifacts-while-running：那是官方 S3 上传路径，自建集群上没有。
 python test/run_test.py \
     --include \

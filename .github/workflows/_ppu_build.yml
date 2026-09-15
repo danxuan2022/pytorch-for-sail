@@ -1,37 +1,8 @@
-# =============================================================================
-# PPU torch whl 源码编译：可复用 workflow（唯一的编译实现）。
-#
-# 为什么抽成 workflow_call：
-#   ccache 能否命中，取决于「缓存 key 前缀」与「编译参数（镜像 / 架构 / 编译器）」两侧
-#   完全一致。如果种缓存的流水线和读缓存的流水线各自维护一份 steps，任何一侧漏改都会
-#   静默退化成冷编译，而且日志上只表现为「命中率 0」，极难定位。因此把整段编译逻辑放在
-#   这里，调用方只传参、不复制 steps。
-#
-# 当前调用方（每种板型一条 PR 流水线，靠 board 区分）：
-#   - ppu_refresh_cache.yml     : push / 手动，矩阵跑 board=810/890，save-ccache=true
-#   - ppu_linux_build_810.yml   : PR 触发，board=810（arch 8.0），只读缓存
-#   - ppu_linux_build_890.yml   : PR 触发，board=890（arch 8.9），只读缓存
-#
-# 只有刷缓存流水线回写，PR 一律只读 —— 这不是保守，而是缓存作用域决定的（GitHub 硬规则）：
-#   - 缓存条目按创建它的 ref 隔离。一次 run 只能读到「当前分支 + base 分支 + 默认分支」
-#     这三个作用域里的条目，读不到兄弟分支 / 其它 PR 的。
-#   - 因此 save-ccache=true 只给 ppu_refresh_cache.yml：它由 push / 手动触发，跑在分支上，
-#     写出的条目对以该分支为 base 的 PR 可见，就是「跟 PR 共享」的那唯一一份基线。
-#   （可自证的观察点：下面 Report repo cache usage 跑的 gh cache list 是仓库级的，能列出
-#    所有条目并带 REF 列 —— 能列出 ≠ 能 restore。）
-# =============================================================================
 name: ppu-build (reusable)
 
 on:
   workflow_call:
     inputs:
-      # ---- 下面三项是 cache key 的组成部分，必须只有这一份定义 ----
-      # 前缀 = ppu-ccache-<build-environment>-<board>-<分支>-<sha256(docker-image + arch)>-
-      # 所以调用方只传一个 board，「board → 环境标识后缀 / 目标架构」的映射只在这一份
-      # 文件里：若让 PR 流水线与刷缓存矩阵各写一份 arch，任何一侧漏改都会让两边算出
-      # 不同前缀，PR 静默地退化成 4~5h 冷编译，日志上只表现为「命中率 0」。
-      # 改镜像 / 改架构映射就改这里，所有流水线一起动（旧缓存自动失效，合入后
-      # ppu_refresh_cache.yml 的 push 触发会重种，也可手动触发一次）。
       board:
         description: |
           板型：810 或 890。它单手决定目标架构（810 → 8.0，890 → 8.9），

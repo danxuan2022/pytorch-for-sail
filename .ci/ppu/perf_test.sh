@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # =============================================================================
 # PPU pod 内：CUDA inductor 性能测试入口。
-# 由 .github/workflows/ppu_perf_810/890.yml 经 flytiger-eco/ppu-distributed-action
+# 由 .github/workflows/ppu_ci_810/890.yml 的 perf job 经 flytiger-eco/ppu-distributed-action
 # 在单卡 PPU pod 内执行（源码已由 action 解压到 pod 的 source_dir）。
 #
 # 单独抽成脚本而不是内联到 yaml 的 command：command 由 pod 的默认 shell 执行，
 # 未必是 bash，而 sdk_env.sh 依赖 bash 语法（[[ ]] / BASH_SOURCE）且必须被 source。
 #
-# torch 来自 ppu-linux-build-810/890 编译产出的 whl（workflow 侧已下载到 WHEEL_DIR，随源码一起
+# torch 来自 ppu-ci-810/890 的 build job 编译产出的 whl（workflow 侧已下载到 WHEEL_DIR，随源码一起
 # 送进 pod），由 install_wheel.sh 安装：跑的是 PPU 基础镜像，镜像里没有 torch，
 # 门禁必须测本 PR 编出来的那一份。
 #
@@ -52,7 +52,7 @@ echo "[perf] 源码目录: $(pwd)"
 # 也必须放在装 torch 之前 —— import torch 要能找到 SDK 里的运行时库。
 source .ci/ppu/sdk_env.sh
 
-# 安装被测的 torch：本 PR 由 ppu_linux_build_810/890.yml 编出来的 whl
+# 安装被测的 torch：本 PR 由 ppu_ci_810/890.yml 的 build job 编出来的 whl
 bash .ci/ppu/install_wheel.sh
 
 # inductor 用例的 codegen 后端：钉版本、且只从内部源装（理由见 install_triton.sh 头注释）。
@@ -105,7 +105,7 @@ mkdir -p "$TEST_REPORTS_DIR"
 # HAS_GPU / requires_gpu_and_triton 等装饰器自行处理，不需要额外传设备参数。
 #
 # H100/B200 专属用例不必手工剔除：它们由 IS_BIG_GPU / is_big_gpu() / SM80OrLater 等
-# 运行期能力探测装饰，在 PPU 上是 skip 而不是 fail（与 ppu_accuracy_810/890.yml 里手工剔
+# 运行期能力探测装饰，在 PPU 上是 skip 而不是 fail（与 ppu_ci_810/890.yml 的 accuracy job 里手工剔
 # inductor/test_max_autotune 那类整文件 H100 用例的处理方式不同：这里是文件内少数用例）。
 #
 # 用例名必须是 run_test.py 发现得到的测试名（即 tools/testing/discover_tests.py 的 TESTS，

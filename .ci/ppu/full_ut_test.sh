@@ -7,7 +7,7 @@
 # 单独抽成脚本而不是内联到 yaml 的 command：command 由 pod 的默认 shell 执行，
 # 未必是 bash，而 sdk_env.sh 依赖 bash 语法（[[ ]] / BASH_SOURCE）且必须被 source。
 #
-# torch 来自 ppu-linux-build-810/890 编译产出的 whl（workflow 侧已下载到 WHEEL_DIR，随源码一起
+# torch 来自 ppu-ci-810/890 的 build job 编译产出的 whl（workflow 侧已下载到 WHEEL_DIR，随源码一起
 # 送进 pod），由 install_wheel.sh 安装：跑的是 PPU 基础镜像，镜像里没有 torch，
 # 门禁必须测本 PR 编出来的那一份。
 #
@@ -51,7 +51,7 @@
 # -----------------------------------------------------------------------------
 # 同样两层，缺一不可：
 #   - 文件级：test_scaled_matmul_cuda（整个文件只有 TestFP8Matmul）与 inductor/test_fp8
-#     （全量 FP8 语义）整文件剔掉，与 ppu_smoke_810/890.yml / ppu_accuracy_810/890.yml 的取舍一致。
+#     （全量 FP8 语义）整文件剔掉，与 ppu_ci_810/890.yml 的 smoke / accuracy job 的取舍一致。
 #   - 用例级：-k 排除表达式，兜住散落在其它文件里的 FP8 用例（例如 dtype 参数化出来的
 #     ..._float8_e4m3fn、test_sparse_semi_structured 的 test_sparse_fp8fp8_mm）。
 #     pytest 的 -k 是**大小写敏感**的子串匹配，所以 fp8/FP8/Fp8、float8/Float8、
@@ -106,7 +106,7 @@ echo "[full-ut] 配置: UT_CONFIG=${UT_CONFIG} 分片=${SHARD_NUMBER}/${NUM_TEST
 # 也必须放在装 torch 之前 —— import torch 要能找到 SDK 里的运行时库。
 source .ci/ppu/sdk_env.sh
 
-# 安装被测的 torch：本 PR 由 ppu_linux_build_810/890.yml 编出来的 whl
+# 安装被测的 torch：本 PR 由 ppu_ci_810/890.yml 的 build job 编出来的 whl
 bash .ci/ppu/install_wheel.sh
 
 # inductor 用例的 codegen 后端：钉版本、且只从内部源装（理由见 install_triton.sh 头注释）。
@@ -178,7 +178,7 @@ EXCLUDE_PREFIXES=(
 # 精确文件名。分组即剔除理由；每组都能独立回滚（例如 PPU 支持 FP8 后只删第 1 组）。
 EXCLUDE_NAMES=(
     # --- 1) FP8 专属整文件：真武 PPU 不支持 FP8 ---------------------------------
-    # 与 ppu_smoke_810/890.yml / ppu_accuracy_810/890.yml 的裁剪保持一致；PPU 支持 FP8 后加回来。
+    # 与 ppu_ci_810/890.yml 的 smoke / accuracy job 的裁剪保持一致；PPU 支持 FP8 后加回来。
     # 这两个文件里**所有**用例都是 FP8 语义，留在门禁里只会整体失败。
     test_scaled_matmul_cuda
     inductor/test_fp8
@@ -227,7 +227,7 @@ EXCLUDE_NAMES=(
     test_hub                        # 需访问 github.com 拉模型
 
     # --- 5) H100/B200(SM90+ / TMA / CUTLASS) 整文件专属 -------------------------
-    # 与 ppu_accuracy_810/890.yml 同一个取舍：**整文件**都是大卡专属的才在这里剔；
+    # 与 ppu_ci_810/890.yml 的 accuracy job 同一个取舍：**整文件**都是大卡专属的才在这里剔；
     # 文件内少数大卡用例（如 inductor/test_flex_attention 里那个 TMA 用例）不动 ——
     # 它们由 IS_BIG_GPU / is_big_gpu() / SM90OrLater 等运行期能力探测装饰，
     # 在 PPU 上是 skip 而不是 fail。
