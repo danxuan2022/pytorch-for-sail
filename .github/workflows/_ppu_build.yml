@@ -15,10 +15,6 @@
 # 只有刷缓存流水线回写，PR 一律只读 —— 这不是保守，而是缓存作用域决定的（GitHub 硬规则）：
 #   - 缓存条目按创建它的 ref 隔离。一次 run 只能读到「当前分支 + base 分支 + 默认分支」
 #     这三个作用域里的条目，读不到兄弟分支 / 其它 PR 的。
-#   - pull_request 的 run 写出的条目落在 refs/pull/<N>/merge，别的 PR 一条都读不到 ——
-#     哪怕 key 与基线一字不差（前缀里本来就没有 PR 标识）。让 PR 回写只能服务它自己，
-#     却要占满仓库 10GiB 配额，GitHub 按 LRU 淘汰时很可能把共享基线挤掉，反而让所有 PR
-#     下一轮全变冷编译。
 #   - 因此 save-ccache=true 只给 ppu_refresh_cache.yml：它由 push / 手动触发，跑在分支上，
 #     写出的条目对以该分支为 base 的 PR 可见，就是「跟 PR 共享」的那唯一一份基线。
 #   （可自证的观察点：下面 Report repo cache usage 跑的 gh cache list 是仓库级的，能列出
