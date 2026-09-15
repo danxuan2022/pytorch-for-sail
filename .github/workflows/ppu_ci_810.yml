@@ -51,8 +51,6 @@ concurrency:
 
 permissions:
   contents: read
-  # 同一个 run 内用 actions/download-artifact@v4 按名取 build 上传的 whl 也需要 actions: read
-  # —— v4 走 Actions Artifact API，缺这个 scope 会 403（顶层 permissions 一旦写死就只剩所列项）。
   actions: read
 
 env:
