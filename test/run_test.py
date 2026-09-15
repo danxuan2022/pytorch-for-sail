@@ -104,14 +104,6 @@ HAVE_TEST_SELECTION_TOOLS = True
 TEST_CONFIG = os.getenv("TEST_CONFIG", "")
 BUILD_ENVIRONMENT = os.getenv("BUILD_ENVIRONMENT", "")
 RERUN_DISABLED_TESTS = os.getenv("PYTORCH_TEST_RERUN_DISABLED_TESTS", "0") == "1"
-# [临时-统计模式] 为方便人工统计成功/失败用例数：设 PYTORCH_COUNT_ONLY=1 时
-#   1) pytest 关闭失败重跑（--reruns=0）且去掉 -x（不在首个失败处停止），使每个测试
-#      文件完整跑一遍，末尾的 pytest 汇总行即为真实的 passed/failed 数；
-#   2) 跳过 run_test_retries 的自定义重试循环（见 should_retry），避免同一文件被反复
-#      重跑导致计数翻倍；
-#   3) 隐式打开 continue-through-error，让文件级失败也不中断，跑完所有文件再收尾。
-# 统计完成后请删除本标记相关的临时代码。
-COUNT_ONLY = os.getenv("PYTORCH_COUNT_ONLY", "0") == "1"
 DISTRIBUTED_TEST_PREFIX = "distributed"
 INDUCTOR_TEST_PREFIX = "inductor"
 IS_SLOW = "slow" in TEST_CONFIG or "slow" in BUILD_ENVIRONMENT
@@ -622,14 +614,14 @@ def run_test(
         os.close(log_fd)
 
     command = (launcher_cmd or []) + executable + argv
-    should_retry = (
-        "--subprocess" not in command
-        and not RERUN_DISABLED_TESTS
-        and not is_cpp_test
-        and "-n" not in command
-        # [临时-统计模式] 统计时强制单次运行，跳过重试循环
-        and not COUNT_ONLY
-    )
+    # [临时] 不停止、不重跑：强制单次运行，跳过 run_test_retries 的自定义重试循环，
+    # 配合下方 get_pytest_args 去掉的 -x，每个测试文件会把用例全部跑完。
+    # 恢复时把下行换回原逻辑：
+    #   should_retry = (
+    #       "--subprocess" not in command and not RERUN_DISABLED_TESTS
+    #       and not is_cpp_test and "-n" not in command
+    #   )
+    should_retry = False
     timeout = (
         None
         if not options.enable_timeout
@@ -1254,10 +1246,7 @@ def handle_log_file(
 
 
 def get_pytest_args(options, is_cpp_test=False, is_distributed_test=False):
-    if COUNT_ONLY:
-        # [临时-统计模式] 不重跑、不在首个失败处停止：整文件跑完，pytest 汇总即真实计数
-        rerun_options = ["--reruns=0"]
-    elif is_distributed_test:
+    if is_distributed_test:
         # Distributed tests do not support rerun, see https://github.com/pytorch/pytorch/issues/162978
         rerun_options = ["-x", "--reruns=0"]
     elif RERUN_DISABLED_TESTS:
@@ -1269,9 +1258,9 @@ def get_pytest_args(options, is_cpp_test=False, is_distributed_test=False):
         # flakiness status. Default to 50 re-runs
         rerun_options = ["--flake-finder", f"--flake-runs={count}"]
     else:
-        # When under the normal mode, retry a failed test 2 more times. -x means stop at the first
-        # failure
-        rerun_options = ["-x", "--reruns=2"]
+        # [临时] 不停止、不重跑：去掉 -x（不在首个失败处停止）、--reruns=0（不重跑），
+        # 让每个测试文件里的用例全部跑完（恢复时改回 ["-x", "--reruns=2"]）
+        rerun_options = ["--reruns=0"]
 
     pytest_args = [
         "-vv",
@@ -1620,9 +1609,8 @@ def parse_args():
     if "--" in extra:
         extra.remove("--")
     args.additional_args = extra
-    # [临时-统计模式] 统计时隐式打开 continue-through-error：文件级失败也不中断
-    if COUNT_ONLY:
-        args.continue_through_error = True
+    # [临时] 不停止：文件级失败也不中断，跑完所有测试文件（恢复时删掉下行）
+    args.continue_through_error = True
     return args
 
 
