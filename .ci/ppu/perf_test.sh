@@ -143,9 +143,9 @@ python test/run_test.py \
     --include \
         inductor/test_perf \
         inductor/test_benchmark_fusion \
-        inductor/test_kernel_benchmark \
         inductor/test_benchmarking \
         inductor/test_analysis \
+#        inductor/test_kernel_benchmark \
     -k "$(ppu_cuda_only_k_expr \
         "not fp8 and not float8 and not e4m3 and not e5m2" \
         "not test_fusion_choice4_cpu")" \

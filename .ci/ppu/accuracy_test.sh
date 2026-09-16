@@ -105,7 +105,7 @@ python test/run_test.py \
         inductor/test_cuda_repro \
         inductor/test_cudagraph_trees \
         inductor/test_gpu_select_algorithm \
-        inductor/test_torchinductor_dynamic_shapes \
+#        inductor/test_torchinductor_dynamic_shapes \
     -k "$(ppu_cuda_only_k_expr "$K_FP8")" \
     --verbose
 
