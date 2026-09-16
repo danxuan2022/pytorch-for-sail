@@ -62,6 +62,16 @@ bash .ci/ppu/install_test_deps.sh
 # EMIT_METRICS=False 静默降级（日志里那条 "Unable to import boto3" 只是提示，不影响退出码），
 # 自建集群也没有对应凭证。
 
+# -----------------------------------------------------------------------------
+# 只跑 CUDA：--include 只能挑**文件**，而这几个文件内部同时定义了 CPU 与 GPU 两套用例
+# （test_torchinductor.py 的 CpuTests / SweepInputsCpuTest、
+#   test_torchinductor_dynamic_shapes.py 的 DynamicShapesCpuTests 都是 CommonTemplate 的
+#   整份 CPU 拷贝，各占所在文件一半用例）。用公共过滤器把它们收掉，
+# 两层机制（PYTORCH_TESTING_DEVICE_ONLY_FOR + 类名级 -k）的缘由见 cuda_only_filter.sh 头注释。
+# 必须 source：它要 export 环境变量并定义 ppu_cuda_only_k_expr 给下面用。
+# shellcheck source=.ci/ppu/cuda_only_filter.sh
+source .ci/ppu/cuda_only_filter.sh
+
 echo "=== CUDA inductor 精度单测（run_test.py --include 白名单过滤，仅 CUDA 相关） ==="
 # 下面的 include 白名单是"可调项"：先给一组有代表性的 CUDA 精度用例，
 # 请按 PPU 实际支持情况增删（例如想加深 op 级覆盖可加 inductor/test_torchinductor_opinfo，
@@ -75,16 +85,28 @@ echo "=== CUDA inductor 精度单测（run_test.py --include 白名单过滤，�
 # test_gpu_select_algorithm：上游 #163615 把 test_cuda_select_algorithm.py 泛化成兼容 XPU 后
 # 改名而来，内容仍是 GPU 版 select_algorithm（instantiate_device_type_tests 的
 # only_for=("cuda","xpu")），在 PPU 上跑的仍是 cuda 那一半。
-# FP8：inductor/test_fp8 已移除——真武 PPU 当前不支持 FP8，该文件全量为 FP8 语义，
-# 与 ppu_ci_810/890.yml 的 smoke job 的裁剪保持一致；PPU 支持 FP8 后再加回来。
+# FP8：真武 PPU 当前不支持 FP8，两层都要。
+#   - 文件级：inductor/test_fp8（全量 FP8 语义）不在上面白名单里，与 smoke job 一致。
+#   - 用例级：下面 -k 里的 FP8 排除表达式，兜住白名单文件内散落的 FP8 用例 ——
+#     test_torchinductor.py 的 test_generate_rand_fp8（在 CommonTemplate 里，会被 copy_tests
+#     拷成 GPUTests.test_generate_rand_fp8_cuda 真跑）与 test_cuda_repro.py 的
+#     test_float8_e8m0fnu。pytest 的 -k 大小写敏感，故 fp8/float8/e4m3/e5m2 各写一份。
+# PPU 支持 FP8 后：把白名单里加回 inductor/test_fp8、删掉下面 K_FP8 即可。
+K_FP8="not fp8 and not FP8 and not Fp8 \
+and not float8 and not Float8 \
+and not e4m3 and not E4M3 \
+and not e5m2 and not E5M2"
 # 不使用 --upload-artifacts-while-running：那是官方 S3 上传路径，自建集群上没有。
+# -k 是 run_test.py 的 --pytest-k-expr，会原样透传给 pytest：这里把公共过滤器算出的
+# 纯 CPU 类排除与 K_FP8 用 and 拼成一条。
 python test/run_test.py \
     --include \
         inductor/test_torchinductor \
-        inductor/test_torchinductor_dynamic_shapes \
         inductor/test_cuda_repro \
         inductor/test_cudagraph_trees \
         inductor/test_gpu_select_algorithm \
+        inductor/test_torchinductor_dynamic_shapes \
+    -k "$(ppu_cuda_only_k_expr "$K_FP8")" \
     --verbose
 
 echo "[accuracy] 完成"

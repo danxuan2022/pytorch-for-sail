@@ -44,11 +44,16 @@
 # 需要更多卡的那些用例带 @skip_if_lt_x_gpu(N) / with_comms，2 卡上是 skip 而不是 fail。
 #
 # -----------------------------------------------------------------------------
-# 两层「只跑 CUDA」过滤
+# 三层「只跑 CUDA」过滤
 # -----------------------------------------------------------------------------
 #   1. PYTORCH_TESTING_DEVICE_ONLY_FOR=cuda：用例级。instantiate_device_type_tests 只实例化
 #      cuda 变体，不会生成 cpu/meta 那一份。
 #   2. --include 白名单：文件级。本脚本逐条列出要跑的测试文件，天然不含非 CUDA 文件。
+#   3. 类名约 -k 排除手写 CPU 套件：第 1 层管不到那种不走 device type 实例化、直接
+#      手写 device="cpu" 的套件——本白名单里就有两个：test_c10d_functional_native 的
+#      CompileTestCPU（FakeStore + fake backend 跑 CPU inductor all-reduce）与 test_aot_inductor
+#      的 AOTInductorTestABICompatibleCpu。这一层与第 1 层都由公共的 cuda_only_filter.sh
+#      提供（类名清单扫 test/ 现场算出，防 rebase 后静默过期）。
 #
 # FP8 过滤同样两层（真武 PPU 当前不支持 FP8）：
 #   1. 文件级：本清单里没有纯 FP8 文件（test_scaled_matmul_cuda / inductor/test_fp8 不在其中）。
@@ -146,17 +151,23 @@ bash .ci/ppu/install_test_deps.sh
 # -----------------------------------------------------------------------------
 # 过滤条件
 # -----------------------------------------------------------------------------
-# 第 1 层：用例级「只跑 CUDA」。见文件头。
-export PYTORCH_TESTING_DEVICE_ONLY_FOR="cuda"
+# 第 1 层 + 第 3 层：公共的「只跑 CUDA」过滤器。见文件头。
+# 它 export PYTORCH_TESTING_DEVICE_ONLY_FOR=cuda（第 1 层），并定义 ppu_cuda_only_k_expr
+# （第 3 层：按类名排掉 CompileTestCPU / AOTInductorTestABICompatibleCpu 这类手写 CPU 套件）。
+# 必须 source：要让 export 与函数定义作用于后续进程。
+# shellcheck source=.ci/ppu/cuda_only_filter.sh
+source .ci/ppu/cuda_only_filter.sh
 
 # 用例级 FP8 排除表达式（-k 会被 run_test.py 原样透传给 pytest 的 -k）。
 # 大小写各写一份、以及最后两条「名字里没有 fp8 字样」的补充，原因见文件头。
-K_FP8="not fp8 and not FP8 and not Fp8 \
+# 用 ppu_cuda_only_k_expr 把第 3 层的纯 CPU 类排除与下面的 FP8 表达式合成一条，
+# run_case 里再用它与各 entry 自带的 own_k 组合。
+K_FP8="$(ppu_cuda_only_k_expr "not fp8 and not FP8 and not Fp8 \
 and not float8 and not Float8 \
 and not e4m3 and not E4M3 \
 and not e5m2 and not E5M2 \
 and not scaled_matmul \
-and not test_fixed_striding"
+and not test_fixed_striding")"
 
 # -----------------------------------------------------------------------------
 # 跑批

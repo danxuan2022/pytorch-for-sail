@@ -32,7 +32,7 @@
 #   - jit_legacy 走 legacy jit executor，恰好是 --exclude-jit-executor 排掉的那批。
 #
 # -----------------------------------------------------------------------------
-# 仅 CUDA：两层过滤
+# 仅 CUDA：三层过滤
 # -----------------------------------------------------------------------------
 # 第 1 层（用例级）PYTORCH_TESTING_DEVICE_ONLY_FOR=cuda：
 #   common_device_type.py 的 instantiate_device_type_tests 读这个变量，只实例化 cuda
@@ -45,6 +45,12 @@
 #   EXCLUDE_PREFIXES / EXCLUDE_NAMES，按组注明了剔除理由。
 #   注意 run_test.py 自己已经默认排掉了 C++ 测试、test_mps / test_metal、test_xpu、
 #   test_openreg 和 onnx/*（见 get_selected_tests），这里不重复列。
+# 第 3 层（类级）-k 按类名排除纯 CPU 套件：
+#   夹在中间的还有一类——文件本身要跑（里面有 GPU 用例），但同一个文件里又手工
+#   拷了一份完整的 CPU 套件（copy_tests(Template, XxxCpuTests, "cpu") 或 `if HAS_CPU:`
+#   守着的类）。这种写法不走 device type 实例化机制，第 1 层的环境变量管不到，
+#   只能按类名剔。类名清单不写死，由 .ci/ppu/cuda_only_filter.sh 每次跑批前扫 test/
+#   现场算出来（防止 rebase 上游后静默过期），第 1 层也一并在那份共享脚本里做。
 #
 # -----------------------------------------------------------------------------
 # FP8：真武 PPU 当前不支持 FP8，必须过滤（硬性要求，不是可选优化）
@@ -142,9 +148,17 @@ bash .ci/ppu/install_test_deps.sh
 # 自建集群也没有对应凭证。
 
 # -----------------------------------------------------------------------------
-# 第 1 层过滤：仅实例化 CUDA 变体（对齐 .ci/pytorch/test.sh 对 cuda BUILD_ENVIRONMENT 的处理）
+# 第 1 层 + 第 3 层过滤：公共的「只跑 CUDA」过滤器
 # -----------------------------------------------------------------------------
-export PYTORCH_TESTING_DEVICE_ONLY_FOR="cuda"
+# 它里面做两件事：export PYTORCH_TESTING_DEVICE_ONLY_FOR=cuda（第 1 层，对齐
+# .ci/pytorch/test.sh 对 cuda BUILD_ENVIRONMENT 的处理），以及扫 test/ 算出纯 CPU 测试类的
+# -k 排除表达式（第 3 层，下面跑批处用 ppu_cuda_only_k_expr 取用）。
+# 全量 UT 下第 3 层的收益比其它门禁更大：inductor/ 下大量文件（test_torchinductor、
+# test_torchinductor_dynamic_shapes、test_fused_attention、test_cpp_wrapper …）都是一份
+# CommonTemplate 拷成 CpuTests + GPUTests 两份，文件不能排，但 CPU 那一半必须排。
+# 必须 source：它要 export 环境变量并定义 ppu_cuda_only_k_expr 给下面用。
+# shellcheck source=.ci/ppu/cuda_only_filter.sh
+source .ci/ppu/cuda_only_filter.sh
 
 # slow 语义（对齐 .ci/pytorch/test.sh 里 TEST_CONFIG == 'slow' 的分支）
 # 说明：pod 内没有 CI 环境变量，run_test.py 的 IS_CI 为 False，因此不会带
@@ -319,7 +333,7 @@ python test/run_test.py \
     --exclude-quantization-tests \
     --exclude "${EXCLUDE_TESTS[@]}" \
     --shard "$SHARD_NUMBER" "$NUM_TEST_SHARDS" \
-    -k "$K_EXPR" \
+    -k "$(ppu_cuda_only_k_expr "$K_EXPR")" \
     --continue-through-error \
     --verbose
 

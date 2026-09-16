@@ -29,6 +29,9 @@
 # （fp8|float8|e4m3|e5m2 在这 5 个文件里一个都没有），仍显式挂上 -k 排除表达式作为
 # 防回归护栏 —— rebase 上游后若有人往这些文件里加 FP8 用例，不必再改这份脚本。
 #
+# 仅 CUDA：--include 只能挑**文件**，而这几个文件内部同时定义了 CPU 与 GPU 两套用例，
+#   所以还要叠一层设备过滤，具体机制见 .ci/ppu/cuda_only_filter.sh 的头注释。
+#
 # 依赖环境变量：
 #   WHEEL_DIR        - torch whl 所在目录（默认 <repo>/.ci/ppu/wheelhouse，供 install_wheel.sh 使用）
 #   SDK_INSTALL_DIR  - PPU SDK 安装目录（默认 /usr/local，供 sdk_env.sh 使用）
@@ -80,6 +83,14 @@ ppu-smi || echo "[warn] ppu-smi 不可用，请确认 pod 已分配 PPU 设备"
 # 安装逻辑（含 pip 源诊断与多源回退）抽到共享脚本，smoke_test.sh / accuracy_test.sh 用同一份。
 bash .ci/ppu/install_test_deps.sh
 
+# 只跑 CUDA 的公共过滤器：export PYTORCH_TESTING_DEVICE_ONLY_FOR=cuda（只实例化 CUDA
+# 变体）+ 算出一条按类名排除纯 CPU 套件的 -k 表达式。本门禁最典型的受害者是
+# inductor/test_benchmark_fusion.py 的 BenchmarkFusionCpuTest：它由 `if HAS_CPU:` 守着，
+# 是整份 BenchmarkFusionTestTemplate 的 CPU 拷贝，环境变量管不到，必须按类名剔。
+# 必须 source：它要 export 环境变量并定义 ppu_cuda_only_k_expr 给下面用。
+# shellcheck source=.ci/ppu/cuda_only_filter.sh
+source .ci/ppu/cuda_only_filter.sh
+
 # boto3 故意不装：它只被 tools/stats/upload_metrics.py 用于往官方 S3 上报指标，缺失时
 # EMIT_METRICS=False 静默降级（日志里那条 "Unable to import boto3" 只是提示，不影响退出码），
 # 自建集群也没有对应凭证。
@@ -101,8 +112,16 @@ mkdir -p "$TEST_REPORTS_DIR"
 #   - inductor/test_analysis          profile_analysis（kernel 耗时/带宽/FLOPS 归因）
 #
 # 只跑 CUDA：这几个文件统一走 torch.testing._internal.inductor_utils 的 GPU_TYPE，
-# 在 PPU 上 GPU_TYPE == "cuda"（PPU 通过 torch.cuda 接口暴露），纯 CPU 分支由
-# HAS_GPU / requires_gpu_and_triton 等装饰器自行处理，不需要额外传设备参数。
+# 在 PPU 上 GPU_TYPE == "cuda"（PPU 通过 torch.cuda 接口暴露）。但「文件是 GPU 的」不等于
+# 「用例都是 GPU 的」，所以设备过滤要靠上面 source 进来的公共过滤器 + 这里一个用例级补充：
+#   - inductor/test_benchmark_fusion  `if HAS_CPU:` 下的 BenchmarkFusionCpuTest 是整份模板的
+#                                     CPU 拷贝（约占该文件一半用例）-> 公共过滤器按类名剔
+#   - inductor/test_analysis          走 instantiate_device_type_tests，会生成 CPU 变体
+#                                     -> 公共过滤器的 PYTORCH_TESTING_DEVICE_ONLY_FOR 剔
+#   - inductor/test_perf             GPU 测试类里夹着一个纯 CPU 用例 test_fusion_choice4_cpu
+#                                     （按类名收不住）-> 下面 -k 里单独排
+# inductor/test_benchmarking 的几个 CPU smoke 故意保留：它们验的是 benchmarker 计时基座
+# 本身（GPU 路径也建在这个基座上），耗时是微秒级，剔掉反而丢覆盖。
 #
 # H100/B200 专属用例不必手工剔除：它们由 IS_BIG_GPU / is_big_gpu() / SM80OrLater 等
 # 运行期能力探测装饰，在 PPU 上是 skip 而不是 fail（与 ppu_ci_810/890.yml 的 accuracy job 里手工剔
@@ -115,10 +134,11 @@ mkdir -p "$TEST_REPORTS_DIR"
 #   python -c "import sys;sys.path.insert(0,'.');from tools.testing.discover_tests import TESTS;print('inductor/test_perf' in TESTS)"
 # 校验（不需要装 torch）。
 #
-# -k 是 run_test.py 的 --pytest-k-expr，会原样透传给 pytest 作为 -k：用来兜住 FP8。
+# -k 是 run_test.py 的 --pytest-k-expr，会原样透传给 pytest 作为 -k：这里一条表达式同时
+# 兜住 FP8（PPU 不支持）、纯 CPU 测试类（公共过滤器算出来的那批）和 test_fusion_choice4_cpu。
 # 不使用 --upload-artifacts-while-running：那是官方 S3 上传路径，自建集群上没有。
 # -----------------------------------------------------------------------------
-echo "=== [1/2] CUDA inductor 性能单测（run_test.py --include 白名单 + -k 排除 FP8） ==="
+echo "=== [1/2] CUDA inductor 性能单测（run_test.py --include 白名单 + -k 排除 FP8/CPU） ==="
 python test/run_test.py \
     --include \
         inductor/test_perf \
@@ -126,7 +146,9 @@ python test/run_test.py \
         inductor/test_kernel_benchmark \
         inductor/test_benchmarking \
         inductor/test_analysis \
-    -k "not fp8 and not float8 and not e4m3 and not e5m2" \
+    -k "$(ppu_cuda_only_k_expr \
+        "not fp8 and not float8 and not e4m3 and not e5m2" \
+        "not test_fusion_choice4_cpu")" \
     --verbose
 
 # -----------------------------------------------------------------------------
