@@ -1,0 +1,73 @@
+# =============================================================================
+# PPU 红线安全门禁：拦截把「内部身份 / 内网信息」泄漏进本公开 fork 的 PR。
+#
+# 本仓库是 PyTorch 的对外 fork，开发者在阿里内网提交，容易把两类东西带出来：
+#   1) 提交人身份：git author/committer 写成阿里邮箱（@alibaba-inc.com）或阿里花名
+#      式「名.姓」用户名（如 xx.xx），外部拼上邮箱后缀即还原真实身份。
+#   2) 内网红线内容：diff 新增行里的内网 IP（10./172.16-31./192.168./100.64./
+#      169.254.）、代理配置（*_proxy）、阿里内部域名。
+#
+# 检查逻辑全部在 .ci/ppu/security_gate_scan.py，本 workflow 只负责：取到 PR 的
+# base/head 两个提交、把整段区间 checkout 下来（fetch-depth: 0 才能 diff + 读到每个
+# commit 的 author/committer），再把区间交给脚本扫描。
+#
+# 约定对齐 ppu-lint-bc.yml：跑在 GitHub 托管 ubuntu-latest（只需 git + python，不依赖
+# PPU 硬件/内网）；pull_request 只挂在 fork 集成分支 v2.11.0-for-ci 上；不加 paths
+# 过滤——身份泄漏与内网信息可能出现在任意文件/任意 commit，按目录裁剪会漏检。
+#
+# 误报出口：给 PR 打 `suppress-security-gate` 标签 → 传 --warn-only，只告警不拦截；
+# 或在具体行加 `# security-gate: allow` 行内豁免（见脚本头注释）。
+# =============================================================================
+name: ppu-security-gate
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+    branches:
+      - v2.11.0-for-ci
+      - v2.11.0
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}-${{ github.event_name == 'workflow_dispatch' }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  security-gate:
+    name: ppu-security-gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history for base..head diff)
+        uses: actions/checkout@v4
+        with:
+          # 需要 base 与 head 两个提交都在本地，才能 diff 区间并读取每个 commit 的
+          # author/committer 元信息；浅克隆会拿不到 base，故取全量历史。
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Scan for internal identity / network leaks
+        env:
+          # workflow_dispatch 手动触发时没有 PR 上下文，退化为扫描最近一个提交。
+          BASE_SHA: ${{ github.event.pull_request.base.sha || 'HEAD~1' }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || 'HEAD' }}
+          SUPPRESSED: ${{ contains(github.event.pull_request.labels.*.name, 'suppress-security-gate') }}
+        run: |
+          set -euo pipefail
+          WARN_ONLY=""
+          if [ "${SUPPRESSED}" = "true" ]; then
+            WARN_ONLY="--warn-only"
+          fi
+          python .ci/ppu/security_gate_scan.py \
+            --base-sha "${BASE_SHA}" \
+            --head-sha "${HEAD_SHA}" \
+            ${WARN_ONLY}

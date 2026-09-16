@@ -101,10 +101,10 @@ and not e5m2 and not E5M2"
 # 纯 CPU 类排除与 K_FP8 用 and 拼成一条。
 python test/run_test.py \
     --include \
-        inductor/test_torchinductor \
         inductor/test_cuda_repro \
         inductor/test_cudagraph_trees \
         inductor/test_gpu_select_algorithm \
+        inductor/test_torchinductor \
 #        inductor/test_torchinductor_dynamic_shapes \
     -k "$(ppu_cuda_only_k_expr "$K_FP8")" \
     --verbose
