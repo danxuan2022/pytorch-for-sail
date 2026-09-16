@@ -17,6 +17,9 @@
 #
 # 误报出口：给 PR 打 `suppress-security-gate` 标签 → 传 --warn-only，只告警不拦截；
 # 或在具体行加 `# security-gate: allow` 行内豁免（见脚本头注释）。
+#
+# 门禁自身两个文件（本 workflow 与 security_gate_scan.py）因含规则样例（示例内网
+# IP / 代理关键字 / 阿里内部域名），由脚本的 SELF_EXCLUDED_PATHS 整文件跳过内容扫描。
 # =============================================================================
 name: ppu-security-gate
 

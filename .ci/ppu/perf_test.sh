@@ -139,16 +139,22 @@ mkdir -p "$TEST_REPORTS_DIR"
 # 不使用 --upload-artifacts-while-running：那是官方 S3 上传路径，自建集群上没有。
 # -----------------------------------------------------------------------------
 echo "=== [1/2] CUDA inductor 性能单测（run_test.py --include 白名单 + -k 排除 FP8/CPU） ==="
+# 注：inductor/test_kernel_benchmark 暂不纳入白名单。如需启用，作为新的一行加进 --include 即可；
+# 切勿在 \ 续行中间插 # 注释行 —— bash 会先把 # 连同其行尾的 \ 一起吃进注释，导致后面的
+# -k / --verbose 被截断成独立命令（-k: command not found），过滤条件全部失效。
+# test_cat_pointwise 精确排除：pytest 的 -k 是子串匹配，直接写 `not test_cat_pointwise` 会连带
+# 排掉 test_cat_pointwise_many_complex_inputs / _many_simple_inputs / _config_option（这三个在 PPU 上
+# 是通过的），故用 (not A or B or C or D) 只精确剔掉 test_cat_pointwise 本身。
 python test/run_test.py \
     --include \
         inductor/test_perf \
         inductor/test_benchmark_fusion \
         inductor/test_benchmarking \
         inductor/test_analysis \
-#        inductor/test_kernel_benchmark \
     -k "$(ppu_cuda_only_k_expr \
         "not fp8 and not float8 and not e4m3 and not e5m2" \
-        "not test_fusion_choice4_cpu")" \
+        "not test_fusion_choice4_cpu" \
+        "(not test_cat_pointwise or test_cat_pointwise_many_complex_inputs or test_cat_pointwise_many_simple_inputs or test_cat_pointwise_config_option)")" \
     --verbose
 
 # -----------------------------------------------------------------------------

@@ -100,6 +100,18 @@ IP_ALLOWLIST = frozenset(
 # 行内豁免标记：确属误报（如文档举例、测试夹具）时，在该行加下述任一标记即跳过内容扫描。
 SUPPRESS_MARKERS = ("security-gate: allow", "noqa: security-gate")
 
+# 门禁自身文件天然含有规则样例（示例内网 IP / 代理关键字 / 阿里内部域名），否则会
+# 「自己命中自己」，故内容扫描整文件跳过。身份检查基于 commit 元信息、与文件无关，不受影响。
+SELF_EXCLUDED_PATHS = (
+    ".ci/ppu/security_gate_scan.py",
+    ".github/workflows/ppu-security-gate.yml",
+)
+
+
+def is_self_excluded(path: str) -> bool:
+    """path 为仓库相对路径（diff 已剥掉 b/ 前缀）；命中门禁自身文件则跳过内容扫描。"""
+    return any(path == p or path.endswith("/" + p) for p in SELF_EXCLUDED_PATHS)
+
 
 class Finding(NamedTuple):
     """一条命中记录。location 形如 'commit <sha>' 或 'path/to/file:123'。"""
@@ -306,6 +318,8 @@ def collect_content_findings(base: str, head: str) -> List[Finding]:
     diff_text = _git("diff", "-U0", "--no-color", base, head)
     findings: List[Finding] = []
     for path, lineno, text in iter_added_lines(diff_text):
+        if is_self_excluded(path):
+            continue
         findings += scan_line(path, lineno, text)
     return findings
 
@@ -364,6 +378,11 @@ def _run_self_test() -> int:
     assert not hits("dns = 8.8.8.8")  # 公共 DNS 白名单
     assert not hits("host = 10.1.2.3  # security-gate: allow")  # 行内豁免
     assert not hits("mask = 255.255.255.255")
+
+    # 门禁自身文件跳过内容扫描（否则规则里的样例 IP / 域名会自己命中自己）
+    assert is_self_excluded(".ci/ppu/security_gate_scan.py")
+    assert is_self_excluded(".github/workflows/ppu-security-gate.yml")
+    assert not is_self_excluded(".ci/ppu/build_wheel.sh")
 
     # diff 解析：行号与路径
     diff = (
