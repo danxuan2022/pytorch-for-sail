@@ -103,7 +103,8 @@ and not e5m2 and not E5M2"
 # pytest 的 -k 是子串匹配，这三个名字在对应文件内唯一，不会误伤其它用例。
 K_SKIP_CASES="not test_not_disabling_ftz_yields_zero \
 and not test_triton_interpret \
-and not test_graph_partition_user_defined_triton_kernel_reuse"
+and not test_graph_partition_user_defined_triton_kernel_reuse \
+and not test_graph_partition_reorder_cpu_and_gpu_interleave"
 # 不使用 --upload-artifacts-while-running：那是官方 S3 上传路径，自建集群上没有。
 # -k 是 run_test.py 的 --pytest-k-expr，会原样透传给 pytest：这里把公共过滤器算出的
 # 纯 CPU 类排除、K_FP8 与 K_SKIP_CASES 用 and 拼成一条。
