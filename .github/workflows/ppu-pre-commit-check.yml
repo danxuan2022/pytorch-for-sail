@@ -20,8 +20,10 @@
 #
 # 门禁自身两个文件（本 workflow 与 security_gate_scan.py）因含规则样例（示例内网
 # IP / 代理关键字 / 阿里内部域名），由脚本的 SELF_EXCLUDED_PATHS 整文件跳过内容扫描。
+# 注意：本文件改名后，必须同步更新 security_gate_scan.py 的 SELF_EXCLUDED_PATHS 与
+# --self-test 断言里的路径，否则本文件会被门禁自己判为泄漏而失败。
 # =============================================================================
-name: ppu-security-gate
+name: ppu-pre-commit-check
 
 on:
   pull_request:
@@ -43,7 +45,7 @@ permissions:
 
 jobs:
   security-gate:
-    name: ppu-security-gate
+    name: ppu-pre-commit-check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (full history for base..head diff)

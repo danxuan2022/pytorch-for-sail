@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """红线安全门禁：扫描 PR 是否把「内部身份 / 内网信息」泄漏进了这个公开 fork。
 
-由 .github/workflows/ppu-security-gate.yml 调用，也可单独执行自查：
+由 .github/workflows/ppu-pre-commit-check.yml 调用，也可单独执行自查：
 
     # 扫描一段提交区间（提交元信息 + 该区间的 diff 新增行）
     python .ci/ppu/security_gate_scan.py --base-sha <base> --head-sha <head>
@@ -104,7 +104,7 @@ SUPPRESS_MARKERS = ("security-gate: allow", "noqa: security-gate")
 # 「自己命中自己」，故内容扫描整文件跳过。身份检查基于 commit 元信息、与文件无关，不受影响。
 SELF_EXCLUDED_PATHS = (
     ".ci/ppu/security_gate_scan.py",
-    ".github/workflows/ppu-security-gate.yml",
+    ".github/workflows/ppu-pre-commit-check.yml",
 )
 
 
@@ -381,7 +381,7 @@ def _run_self_test() -> int:
 
     # 门禁自身文件跳过内容扫描（否则规则里的样例 IP / 域名会自己命中自己）
     assert is_self_excluded(".ci/ppu/security_gate_scan.py")
-    assert is_self_excluded(".github/workflows/ppu-security-gate.yml")
+    assert is_self_excluded(".github/workflows/ppu-pre-commit-check.yml")
     assert not is_self_excluded(".ci/ppu/build_wheel.sh")
 
     # diff 解析：行号与路径

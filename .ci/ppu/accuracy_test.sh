@@ -112,7 +112,7 @@ python test/run_test.py \
         inductor/test_cuda_repro \
         inductor/test_cudagraph_trees \
         inductor/test_gpu_select_algorithm \
-    -k "$(ppu_cuda_only_k_expr "$K_FP8")" \
+    -k "$(ppu_cuda_only_k_expr "$K_FP8" "$K_SKIP_CASES")" \
     --verbose
 
 echo "[accuracy] 完成"

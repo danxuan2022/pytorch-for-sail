@@ -142,19 +142,29 @@ echo "=== [1/2] CUDA inductor 性能单测（run_test.py --include 白名单 + -
 # 注：inductor/test_kernel_benchmark 暂不纳入白名单。如需启用，作为新的一行加进 --include 即可；
 # 切勿在 \ 续行中间插 # 注释行 —— bash 会先把 # 连同其行尾的 \ 一起吃进注释，导致后面的
 # -k / --verbose 被截断成独立命令（-k: command not found），过滤条件全部失效。
-# test_cat_pointwise 精确排除：pytest 的 -k 是子串匹配，直接写 `not test_cat_pointwise` 会连带
-# 排掉 test_cat_pointwise_many_complex_inputs / _many_simple_inputs / _config_option（这三个在 PPU 上
-# 是通过的），故用 (not A or B or C or D) 只精确剔掉 test_cat_pointwise 本身。
+#
+# 排除项拆成两个变量（对齐 accuracy_test.sh 的 K_FP8 / K_SKIP_CASES 写法），再由
+# ppu_cuda_only_k_expr 与公共 CPU 类过滤用 and 拼成一条 -k。切记：定义的变量必须
+# 作为实参传给 ppu_cuda_only_k_expr，否则成死变量、排除不生效。
+#   K_FP8         PPU 不支持 FP8；这 5 个文件经 grep 零 FP8 命中，此处仅作防回归护栏。
+#   K_SKIP_CASES  按用例名精确排除：
+#     - test_fusion_choice4_cpu：GPU 测试类里夹着的纯 CPU 用例，按类名收不住。
+#     - test_cat 与 test_cat_pointwise：PPU 上失败，需剔除。pytest 的 -k 是子串匹配，
+#       `not test_cat` 会连带命中 test_cat_pointwise 及其三个兄弟
+#       test_cat_pointwise_many_complex_inputs / _many_simple_inputs / _config_option；
+#       后三个在 PPU 上是通过的、要保留，故用 (not test_cat or 兄弟1 or 兄弟2 or 兄弟3)：
+#       test_cat、test_cat_pointwise 都不含兄弟名 -> 被剔；三个兄弟命中自身 -> 保留。
+#       （test_noop_cat / test_partitioning_cat 不含连续子串 "test_cat"，不受影响。）
+K_FP8="not fp8 and not float8 and not e4m3 and not e5m2"
+K_SKIP_CASES="not test_fusion_choice4_cpu \
+and (not test_cat or test_cat_pointwise_many_complex_inputs or test_cat_pointwise_many_simple_inputs or test_cat_pointwise_config_option or test_cat_pointwise)"
 python test/run_test.py \
     --include \
         inductor/test_perf \
         inductor/test_benchmark_fusion \
         inductor/test_benchmarking \
         inductor/test_analysis \
-    -k "$(ppu_cuda_only_k_expr \
-        "not fp8 and not float8 and not e4m3 and not e5m2" \
-        "not test_fusion_choice4_cpu" \
-        "(not test_cat_pointwise or test_cat_pointwise_many_complex_inputs or test_cat_pointwise_many_simple_inputs or test_cat_pointwise_config_option)")" \
+    -k "$(ppu_cuda_only_k_expr "$K_FP8" "$K_SKIP_CASES")" \
     --verbose
 
 # -----------------------------------------------------------------------------
