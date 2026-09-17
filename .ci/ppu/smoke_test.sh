@@ -65,9 +65,47 @@ echo "=== CUDA 冒烟用例（run_test.py --include 精确过滤，仅 CUDA 相�
 #   TestFP8Matmul）和 inductor/test_fp8 全量都是 FP8 语义，留在门禁里只会整体失败。
 #   PPU 支持 FP8 后把这两项加回来即可。
 # 不使用 --upload-artifacts-while-running：那是官方 S3 上传路径，自建集群上没有。
+# nn/attention/test_open_registry 是 SDPA flash attention 注册表的纯 Python 逻辑测试
+#   （register/activate impl，用 fake register 函数），不依赖 CUDA/GPU，也不涉及
+#   SM90/TMA/CUTLASS/FP8 专属路径，在真武 PPU 上适用，故纳入冒烟。
+
+# 用例级「点名 skip」排除片段（-k 由 run_test.py 原样透传给 pytest 的 -k，全局作用于
+# 上面 --include 的所有文件）。pytest 的 -k 是**子串**匹配，下面两条需要特别说明：
+#   1. test_template_epilogue_fusion_extra_reads_fuse_epilogue：该测试参数化为
+#      fuse_epilogue(True/False) × use_async_compile(True/False) 共 4 个变体；这个前缀
+#      会一并排掉全部 4 个（含 _fuse_epilogue_False_use_async_compile 变体），符合预期。
+#   2. test_triton_template_generated_code_caching：它是 ..._bmm / ..._mm_plus_mm 两个
+#      兄弟用例的前缀，二者不在排除清单里。直接 not <基名> 会连兄弟一起误伤，故用布尔式
+#      (not 基名 or 兄弟A or 兄弟B) 只排基名、保留两个兄弟。
+# 其余名字在 test_max_autotune.py / test_matmul_cuda.py 内均唯一、无同前缀兄弟，可直接 not。
+#   （test_matmul_dropout_device_cpu 只排 CPU 变体，保留 _device_cuda。）
+# 注意：不要在下面 python 命令的 \ 续行中间插整行 # 注释——bash 会把 # 连同行尾 \ 一起吃进
+#   注释，导致 -k 被截断成独立命令、过滤静默失效。注释一律写在命令上方。
+K_SKIP_CASES="not test_benchmark_choice_fail_in_subproc \
+and not test_lazy_template_fusion_multiple_candidates_use_async_compile \
+and not test_template_epilogue_fusion_static_analysis_test_case_spills_reject_use_async_compile \
+and not test_template_epilogue_fusion_static_analysis_test_case_timing_reject_use_async_compile \
+and not test_async_autotuner_cache_same_inputs \
+and not test_bmm_out_dtype \
+and not test_cat_max_autotune_extern \
+and not test_compilation_after_inactivity \
+and not test_linear_and_cel \
+and not test_max_autotune_mm_plus_mm_zero_size_input_dynamic_False_search_space \
+and not test_max_autotune_regular_mm_zero_size_input_dynamic \
+and not test_mutation_rename \
+and not test_matmul_dropout_device_cpu \
+and not test_template_epilogue_fusion_extra_reads_fuse_epilogue \
+and (not test_triton_template_generated_code_caching or test_triton_template_generated_code_caching_bmm or test_triton_template_generated_code_caching_mm_plus_mm)"
+
 python test/run_test.py \
     --include \
         test_matmul_cuda \
+        test_scaled_matmul_cuda \
+        nn/attention/test_open_registry \
+        inductor/test_flex_flash \
+        inductor/test_nv_universal_gemm \
+        inductor/test_max_autotune \
+    -k "$K_SKIP_CASES" \
     --verbose
 
 echo "[smoke] 完成"

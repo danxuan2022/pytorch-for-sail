@@ -157,7 +157,7 @@ echo "=== [1/2] CUDA inductor 性能单测（run_test.py --include 白名单 + -
 #       （test_noop_cat / test_partitioning_cat 不含连续子串 "test_cat"，不受影响。）
 K_FP8="not fp8 and not float8 and not e4m3 and not e5m2"
 K_SKIP_CASES="not test_fusion_choice4_cpu \
-and (not test_cat or test_cat_pointwise_many_complex_inputs or test_cat_pointwise_many_simple_inputs or test_cat_pointwise_config_option or test_cat_pointwise or test_partitioning_with_view)"
+and (not test_cat or test_cat_pointwise_many_complex_inputs or test_cat_pointwise_many_simple_inputs or test_cat_pointwise_config_option or test_cat_pointwise or test_partitioning_with_view or test_split_scan)"
 python test/run_test.py \
     --include \
         inductor/test_perf \

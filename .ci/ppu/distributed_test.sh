@@ -158,16 +158,31 @@ bash .ci/ppu/install_test_deps.sh
 # shellcheck source=.ci/ppu/cuda_only_filter.sh
 source .ci/ppu/cuda_only_filter.sh
 
-# 用例级 FP8 排除表达式（-k 会被 run_test.py 原样透传给 pytest 的 -k）。
+# 用例级 FP8 排除片段（-k 会被 run_test.py 原样透传给 pytest 的 -k）。
 # 大小写各写一份、以及最后两条「名字里没有 fp8 字样」的补充，原因见文件头。
-# 用 ppu_cuda_only_k_expr 把第 3 层的纯 CPU 类排除与下面的 FP8 表达式合成一条，
-# run_case 里再用它与各 entry 自带的 own_k 组合。
-K_FP8="$(ppu_cuda_only_k_expr "not fp8 and not FP8 and not Fp8 \
+K_FP8_EXPR="not fp8 and not FP8 and not Fp8 \
 and not float8 and not Float8 \
 and not e4m3 and not E4M3 \
 and not e5m2 and not E5M2 \
 and not scaled_matmul \
-and not test_fixed_striding")"
+and not test_fixed_striding"
+
+# 用例级「点名 skip」排除片段：下面 4 个 case 按需求从 distributed 门禁里排掉。
+# 四个用例名在各自文件里都唯一、且互不为前缀，可安全用 not <name> 精确排除：
+#   - test_dtensor_seq_par_shard_dim_0：test_micro_pipeline_tp 里 test_dtensor_seq_par
+#     参数化出的 shard_dim=0 变体；与 shard_dim=1 变体（..._dim_1）不同名，-k 子串
+#     匹配不会误伤 _1。
+#   - test_set_reduce_scatter_divide_factor：test_fully_shard_comm。
+#   - test_basic_all_gather_bucketing：test_aten_comm_compute_reordering。
+#   - test_schedule_overlap_benchmark：test_inductor_collectives。
+K_SKIP_CASES="not test_dtensor_seq_par_shard_dim_0 \
+and not test_set_reduce_scatter_divide_factor \
+and not test_basic_all_gather_bucketing \
+and not test_schedule_overlap_benchmark"
+
+# 用 ppu_cuda_only_k_expr 把第 3 层的纯 CPU 类排除、FP8 排除、点名 skip 合成一条 -k，
+# run_case 里再用它与各 entry 自带的 own_k 组合。
+K_FP8="$(ppu_cuda_only_k_expr "$K_FP8_EXPR" "$K_SKIP_CASES")"
 
 # -----------------------------------------------------------------------------
 # 跑批

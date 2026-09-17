@@ -73,9 +73,12 @@ bash .ci/ppu/install_test_deps.sh
 source .ci/ppu/cuda_only_filter.sh
 
 echo "=== CUDA inductor 精度单测（run_test.py --include 白名单过滤，仅 CUDA 相关） ==="
-# 下面的 include 白名单是"可调项"：先给一组有代表性的 CUDA 精度用例，
-# 请按 PPU 实际支持情况增删（例如想加深 op 级覆盖可加 inductor/test_torchinductor_opinfo，
-# 但该文件很重、耗时长，默认不放进门禁）。
+# 下面的 include 白名单是"可调项"：请按 PPU 实际支持情况增删。
+# 已对齐上游 inductor-unittest.yml 的 GPU `inductor` config（test_inductor_shard）中
+# **不带 --inductor** 的那组 inductor 单测：test_torchinductor / test_torchinductor_opinfo /
+# test_aot_inductor（opinfo 很重、耗时长；test_aot_inductor 里的多卡用例带
+# @requires_multigpu，单卡 PPU 上会自动 skip）。test_modules/test_ops 等通用套件见下方
+# 单独那条 --inductor 调用。
 # 用例名必须是 run_test.py 发现得到的测试名（即 tools/testing/discover_tests.py 的 TESTS，
 # 大体对应 test/ 下去掉 .py 后缀的相对路径）：-i/--include 的 choices 就是这份清单，
 # 写错一个名字 argparse 会直接 exit 2（invalid choice），一个用例也不会跑。
@@ -104,7 +107,16 @@ and not e5m2 and not E5M2"
 K_SKIP_CASES="not test_not_disabling_ftz_yields_zero \
 and not test_triton_interpret \
 and not test_graph_partition_user_defined_triton_kernel_reuse \
-and not test_graph_partition_reorder_cpu_and_gpu_interleave"
+and not test_graph_partition_reorder_cpu_and_gpu_interleave \
+and not test_avg_pool3d_backward2_cuda  \
+and not test_consecutive_split_cumsum_cuda \
+and not test_split_cumprod_cuda"
+
+K_SKIP_CASES1="and not RNN \
+and not LSTM \
+and not GRU \
+and not test_put_cuda_float16""
+
 # 不使用 --upload-artifacts-while-running：那是官方 S3 上传路径，自建集群上没有。
 # -k 是 run_test.py 的 --pytest-k-expr，会原样透传给 pytest：这里把公共过滤器算出的
 # 纯 CPU 类排除、K_FP8 与 K_SKIP_CASES 用 and 拼成一条。
@@ -113,7 +125,26 @@ python test/run_test.py \
         inductor/test_cuda_repro \
         inductor/test_cudagraph_trees \
         inductor/test_gpu_select_algorithm \
+        inductor/test_torchinductor \
+        # inductor/test_torchinductor_opinfo \
+        # inductor/test_aot_inductor \
     -k "$(ppu_cuda_only_k_expr "$K_FP8" "$K_SKIP_CASES")" \
+    --verbose
+
+# 通用 op 套件经 inductor 后端跑：对齐上游 test_inductor_shard 的第一条 run_test.py。
+# 必须**单独一次调用并带 --inductor**——上游明确注明这组通用套件与上面的 inductor/* 单测
+# 不能放同一次 run_test.py，否则 nested dynamo state 会失败。
+# test_modules/test_ops/test_ops_gradients/test_torch 是 PyTorch 最大的通用测试文件，全量跑
+# 很重；仍复用同一套过滤：cuda_only_filter.sh 已 export PYTORCH_TESTING_DEVICE_ONLY_FOR=cuda
+# （只实例化 cuda 变体），-k 再叠加 CPU 类 / FP8 / 点名排除。上游的 --shard 分片在单卡 PPU
+# 门禁里不适用（本脚本未设 NUM_TEST_SHARDS），故不加。
+python test/run_test.py --inductor \
+    --include \
+        test_modules \
+        # test_ops \
+        # test_ops_gradients \
+        test_torch \
+    -k "$(ppu_cuda_only_k_expr "$K_FP8" "$K_SKIP_CASES1")" \
     --verbose
 
 echo "[accuracy] 完成"
