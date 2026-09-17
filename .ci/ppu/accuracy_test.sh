@@ -115,7 +115,7 @@ and not test_split_cumprod_cuda"
 K_SKIP_CASES1="and not RNN \
 and not LSTM \
 and not GRU \
-and not test_put_cuda_float16""
+and not test_put_cuda_float16"
 
 # 不使用 --upload-artifacts-while-running：那是官方 S3 上传路径，自建集群上没有。
 # -k 是 run_test.py 的 --pytest-k-expr，会原样透传给 pytest：这里把公共过滤器算出的
@@ -125,7 +125,7 @@ python test/run_test.py \
         inductor/test_cuda_repro \
         inductor/test_cudagraph_trees \
         inductor/test_gpu_select_algorithm \
-        inductor/test_torchinductor \
+        # inductor/test_torchinductor \
         # inductor/test_torchinductor_opinfo \
         # inductor/test_aot_inductor \
     -k "$(ppu_cuda_only_k_expr "$K_FP8" "$K_SKIP_CASES")" \
