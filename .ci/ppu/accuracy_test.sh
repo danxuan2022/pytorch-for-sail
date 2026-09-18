@@ -112,7 +112,7 @@ and not test_avg_pool3d_backward2_cuda  \
 and not test_consecutive_split_cumsum_cuda \
 and not test_split_cumprod_cuda"
 
-K_SKIP_CASES1="and not RNN \
+K_SKIP_CASES1="not RNN \
 and not LSTM \
 and not GRU \
 and not test_put_cuda_float16"
@@ -120,14 +120,18 @@ and not test_put_cuda_float16"
 # 不使用 --upload-artifacts-while-running：那是官方 S3 上传路径，自建集群上没有。
 # -k 是 run_test.py 的 --pytest-k-expr，会原样透传给 pytest：这里把公共过滤器算出的
 # 纯 CPU 类排除、K_FP8 与 K_SKIP_CASES 用 and 拼成一条。
+# 注意：--include 续行序列中间**不能**插整行 `#` 注释——bash 会把 `#` 连同其行尾的
+# `\` 一起吃进注释，使命令在注释行处提前结束，后面的 `-k ...`（含 K_FP8 / K_SKIP_CASES）
+# 被截断成独立命令（报 `-k: command not found`），run_test.py 只收到 --include、所有 -k
+# 过滤静默失效（表现为点名排除的用例照跑照 Failed）。要临时停用某个文件，直接从下面
+# 删掉它，或把说明写到命令上方。
+# 当前有意未纳入白名单（很重、耗时长，按需增删，勿以行内注释形式放回续行中）：
+#   inductor/test_torchinductor、inductor/test_torchinductor_opinfo、inductor/test_aot_inductor
 python test/run_test.py \
     --include \
         inductor/test_cuda_repro \
         inductor/test_cudagraph_trees \
         inductor/test_gpu_select_algorithm \
-        # inductor/test_torchinductor \
-        # inductor/test_torchinductor_opinfo \
-        # inductor/test_aot_inductor \
     -k "$(ppu_cuda_only_k_expr "$K_FP8" "$K_SKIP_CASES")" \
     --verbose
 
@@ -138,11 +142,11 @@ python test/run_test.py \
 # 很重；仍复用同一套过滤：cuda_only_filter.sh 已 export PYTORCH_TESTING_DEVICE_ONLY_FOR=cuda
 # （只实例化 cuda 变体），-k 再叠加 CPU 类 / FP8 / 点名排除。上游的 --shard 分片在单卡 PPU
 # 门禁里不适用（本脚本未设 NUM_TEST_SHARDS），故不加。
+# 同上：--include 续行序列中间不能插整行 `#` 注释，否则 -k 过滤（K_FP8 / K_SKIP_CASES1）
+# 会被截断失效。当前有意未纳入（test_ops / test_ops_gradients 很重，按需增删，勿以行内注释放回续行）。
 python test/run_test.py --inductor \
     --include \
         test_modules \
-        # test_ops \
-        # test_ops_gradients \
         test_torch \
     -k "$(ppu_cuda_only_k_expr "$K_FP8" "$K_SKIP_CASES1")" \
     --verbose
