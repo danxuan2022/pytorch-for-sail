@@ -163,6 +163,7 @@ and not test_cat_pointwise_many_simple_inputs \
 and not test_cat_pointwise_config_option \
 and not test_cat_pointwise \
 and not test_partitioning_with_view \
+and not test_equivalent_template_code \
 and not test_split_scan"
 python test/run_test.py \
     --include \

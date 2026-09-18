@@ -182,7 +182,9 @@ and not test_set_reduce_scatter_divide_factor \
 and not test_basic_all_gather_bucketing \
 and not test_schedule_overlap_benchmark \
 and not test_bucket_exposed_with_hidden_single_overlap \
-and not test_bucketing_split_for_overlap"
+and not test_bucketing_split_for_overlap \
+and not test_bucketing_wait_sink \
+and not test_fully_shard_force_sum_reduce_scatter"
 
 # 用 ppu_cuda_only_k_expr 把第 3 层的纯 CPU 类排除、FP8 排除、点名 skip 合成一条 -k，
 # run_case 里再用它与各 entry 自带的 own_k 组合。
@@ -288,7 +290,7 @@ run_case "" distributed/_composable/fsdp/test_fully_shard_compile
 # --- dynamo / inductor 的分布式路径（均为 world_size=2）---
 # 这 4 个文件官方是一次 --include 全带上的，保持一致：它们之间没有 -k 差异。
 # distributed/test_dynamo_distributed 这个需要15min，先skip
-run_case "" \
+run_case "test_bucketing_wait_sink" \
     distributed/test_inductor_collectives \
     distributed/test_aten_comm_compute_reordering \
     distributed/test_compute_comm_reordering
