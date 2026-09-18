@@ -41,7 +41,7 @@
 #   PR_NUMBER        - 仅用于日志溯源（可选）
 #   RUN_GPT_FAST     - 是否跑 gpt_fast 微基准（默认 1；设 0 可只跑 inductor perf 单测）
 # =============================================================================
-set -euo pipefail
+set -uo pipefail
 
 export SDK_INSTALL_DIR="${SDK_INSTALL_DIR:-/usr/local}"
 

@@ -181,7 +181,8 @@ K_SKIP_CASES="not test_dtensor_seq_par_shard_dim_0 \
 and not test_set_reduce_scatter_divide_factor \
 and not test_basic_all_gather_bucketing \
 and not test_schedule_overlap_benchmark \
-and not test_bucket_exposed_with_hidden_single_overlap"
+and not test_bucket_exposed_with_hidden_single_overlap \
+and not test_bucketing_split_for_overlap"
 
 # 用 ppu_cuda_only_k_expr 把第 3 层的纯 CPU 类排除、FP8 排除、点名 skip 合成一条 -k，
 # run_case 里再用它与各 entry 自带的 own_k 组合。

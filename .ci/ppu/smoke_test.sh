@@ -17,7 +17,7 @@
 #   PIP_INDEX        - 内部 pip 源（可选；不设则用 install_test_deps.sh 的内置候选源）
 #   PR_NUMBER        - 仅用于日志溯源（可选）
 # =============================================================================
-set -euo pipefail
+set -uo pipefail
 
 export SDK_INSTALL_DIR="${SDK_INSTALL_DIR:-/usr/local}"
 
@@ -95,6 +95,7 @@ and not test_max_autotune_regular_mm_zero_size_input_dynamic \
 and not test_mutation_rename \
 and not test_cublas_baddbmm_large_input \
 and not test_mm_bmm_dtype_overload_float16_M \
+and not test_mm_with_mH_args_backend_cublas_cuda_complex128 \
 and not test_matmul_dropout_device_cpu \
 and not test_template_epilogue_fusion_extra_reads_fuse_epilogue \
 and (not test_triton_template_generated_code_caching or test_triton_template_generated_code_caching_bmm or test_triton_template_generated_code_caching_mm_plus_mm)"

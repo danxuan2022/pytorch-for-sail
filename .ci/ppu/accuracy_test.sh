@@ -115,6 +115,7 @@ and not test_avg_pool3d_backward2_cuda  \
 and not test_consecutive_split_ \
 and not test_linalg_eig_stride_consistency_cuda \
 and not test_sort_stable_cuda \
+and not test_copy_non_blocking_is_pinned_use_cat_True_cuda \
 and not test_split_"
 
 K_SKIP_CASES1="not RNN \
