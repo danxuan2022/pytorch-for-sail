@@ -259,10 +259,10 @@ jobs:
             bash ${{ env.SOURCE_DIR }}/.ci/ppu/smoke_test.sh
 
   # ---------------------------------------------------------------------------
-  # P1 accuracy：单卡 CUDA inductor 精度单测。checkout / 下载 whl / 校验三段同 smoke。
+  # P1 accuracy：2 卡 CUDA inductor 精度单测（脚本内 --shard 分片并行）。checkout / 下载 whl / 校验三段同 smoke。
   # ---------------------------------------------------------------------------
   accuracy:
-    name: ppu-accuracy-cuda (890P 单卡)
+    name: ppu-accuracy-cuda (890P 2 卡分片)
     needs: build
     if: ${{ github.event_name == 'pull_request' }}
     runs-on: k8s-runner-group-cpu-flytiger
@@ -370,11 +370,14 @@ jobs:
             echo "- 来源: ${BUILD_RUN_URL}"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: "890P 单卡 (1 PPU) CUDA inductor 精度单测"
+      - name: "890P 2 卡 (2 PPU) CUDA inductor 精度单测（--shard 分片并行）"
         uses: flytiger-eco/ppu-distributed-action@main
         with:
           nnodes: 0
-          nproc_per_node: 1
+          # 2 卡：pod 可见 2 张 PPU（resources 请求 alibabacloud.com/ppu: "2"），accuracy_test.sh
+          # 内起 2 个 --shard 进程分别用 CUDA_VISIBLE_DEVICES 钉到 0/1 号卡并行跑。
+          # command 仍只执行一次（action 不会按卡重复执行）；分片与钉卡逻辑全在脚本里。
+          nproc_per_node: 2
           node_selector: ${{ env.NODE_SELECTOR }}
           host_volumes: ${{ env.HOST_VOLUMES }}
           image: ${{ env.IMAGE }}

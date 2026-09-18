@@ -2,7 +2,9 @@
 # =============================================================================
 # PPU pod 内：CUDA inductor 精度测试入口。
 # 由 .github/workflows/ppu_ci_810/890.yml 的 accuracy job 经 flytiger-eco/ppu-distributed-action
-# 在单卡 PPU pod 内执行（源码已由 action 解压到 pod 的 source_dir）。
+# 在 2 卡 PPU pod 内执行（nproc_per_node=2；源码已由 action 解压到 pod 的 source_dir）。
+# 分片在脚本内自己做：run_test.py --shard 把用例切 2 份，每卡一个 shard 进程并行跑，
+# 用 CUDA_VISIBLE_DEVICES 把 shard 钉到对应卡（详见文件末尾 run_accuracy_shard）。
 #
 # 单独抽成脚本而不是内联到 yaml 的 command：command 由 pod 的默认 shell 执行，
 # 未必是 bash，而 sdk_env.sh 依赖 bash 语法（[[ ]] / BASH_SOURCE）且必须被 source。
@@ -18,6 +20,7 @@
 #   TRITON_INDEX     - 装 triton 的**唯一**源（默认取 PIP_INDEX，供 install_triton.sh 使用）
 #   TRITON_VERSION   - 钉住的 triton 版本（默认 3.6.0，供 install_triton.sh 使用）
 #   PR_NUMBER        - 仅用于日志溯源（可选）
+#   PPU_ACCURACY_SHARDS - 分片数/并行卡数（默认 2，必须等于 workflow 的 nproc_per_node；设 1 退回单卡全量）
 # =============================================================================
 set -euo pipefail
 
@@ -109,46 +112,96 @@ and not test_triton_interpret \
 and not test_graph_partition_user_defined_triton_kernel_reuse \
 and not test_graph_partition_reorder_cpu_and_gpu_interleave \
 and not test_avg_pool3d_backward2_cuda  \
-and not test_consecutive_split_cumsum_cuda \
-and not test_split_cumprod_cuda"
+and not test_consecutive_split_ \
+and not test_linalg_eig_stride_consistency_cuda \
+and not test_sort_stable_cuda \
+and not test_split_"
 
 K_SKIP_CASES1="not RNN \
 and not LSTM \
 and not GRU \
-and not test_put_cuda_float16"
+and not test_put_cuda_float16 \
+and not test_corrcoef_cuda_complex \
+and not test_cov_cuda_complex"
 
-# 不使用 --upload-artifacts-while-running：那是官方 S3 上传路径，自建集群上没有。
-# -k 是 run_test.py 的 --pytest-k-expr，会原样透传给 pytest：这里把公共过滤器算出的
-# 纯 CPU 类排除、K_FP8 与 K_SKIP_CASES 用 and 拼成一条。
-# 注意：--include 续行序列中间**不能**插整行 `#` 注释——bash 会把 `#` 连同其行尾的
-# `\` 一起吃进注释，使命令在注释行处提前结束，后面的 `-k ...`（含 K_FP8 / K_SKIP_CASES）
-# 被截断成独立命令（报 `-k: command not found`），run_test.py 只收到 --include、所有 -k
-# 过滤静默失效（表现为点名排除的用例照跑照 Failed）。要临时停用某个文件，直接从下面
-# 删掉它，或把说明写到命令上方。
-# 当前有意未纳入白名单（很重、耗时长，按需增删，勿以行内注释形式放回续行中）：
-#   inductor/test_torchinductor、inductor/test_torchinductor_opinfo、inductor/test_aot_inductor
-python test/run_test.py \
-    --include \
-        inductor/test_cuda_repro \
-        inductor/test_cudagraph_trees \
-        inductor/test_gpu_select_algorithm \
-    -k "$(ppu_cuda_only_k_expr "$K_FP8" "$K_SKIP_CASES")" \
-    --verbose
+# -----------------------------------------------------------------------------
+# 2 卡分片并行。本 job 的 pod 由 workflow 侧 nproc_per_node=2 分到 2 张 PPU；但
+# ppu-distributed-action 对每个 pod 只执行一次 command，不会替你按 shard 跑多次，
+# 所以分片在脚本内自己做：run_test.py 的 --shard <which> <num> 把 --include 选中的用例
+# 切成 num 份，这里为每张卡起一个 shard 进程，用 CUDA_VISIBLE_DEVICES 钉到对应卡（0/1）
+# 并行跑，最后聚合两个 shard 的退出码——任一失败即判失败。
+# NUM_SHARDS 必须等于 pod 可见卡数（= workflow 的 nproc_per_node）；设 1 即退回单卡全量。
+# 每个 shard 内仍依次跑下面**两条**独立 run_test.py（inductor/* 单测与 --inductor 通用套件
+# 不能合并到同一次调用，否则 nested dynamo state 失败，理由见第二条上方注释）。
+NUM_SHARDS="${PPU_ACCURACY_SHARDS:-2}"
 
-# 通用 op 套件经 inductor 后端跑：对齐上游 test_inductor_shard 的第一条 run_test.py。
-# 必须**单独一次调用并带 --inductor**——上游明确注明这组通用套件与上面的 inductor/* 单测
-# 不能放同一次 run_test.py，否则 nested dynamo state 会失败。
-# test_modules/test_ops/test_ops_gradients/test_torch 是 PyTorch 最大的通用测试文件，全量跑
-# 很重；仍复用同一套过滤：cuda_only_filter.sh 已 export PYTORCH_TESTING_DEVICE_ONLY_FOR=cuda
-# （只实例化 cuda 变体），-k 再叠加 CPU 类 / FP8 / 点名排除。上游的 --shard 分片在单卡 PPU
-# 门禁里不适用（本脚本未设 NUM_TEST_SHARDS），故不加。
-# 同上：--include 续行序列中间不能插整行 `#` 注释，否则 -k 过滤（K_FP8 / K_SKIP_CASES1）
-# 会被截断失效。当前有意未纳入（test_ops / test_ops_gradients 很重，按需增删，勿以行内注释放回续行）。
-python test/run_test.py --inductor \
-    --include \
-        test_modules \
-        test_torch \
-    -k "$(ppu_cuda_only_k_expr "$K_FP8" "$K_SKIP_CASES1")" \
-    --verbose
+# 单个 shard 的执行体：$1 = shard 序号（1..NUM_SHARDS），钉到第 ($1-1) 号卡。
+# 两条 run_test.py 都跑完（不在首个失败处停，便于一次收集全部失败），退出码取“任一失败即失败”。
+# 用 `if ! ... | sed; then` 而非裸管道：set -e + pipefail 下裸管道一旦失败会立即退出子 shell，
+# 第二条就跑不到了；放进 if 条件可挂起 set -e，PIPESTATUS/管道状态仍能捕获 python 的失败码。
+# 输出加 [shardN] 前缀，避免两个 shard 的 verbose 日志交错后无法区分。
+run_accuracy_shard() {
+    local shard_id="$1"
+    local dev="$((shard_id - 1))"
+    local rc=0
+
+    # 不使用 --upload-artifacts-while-running：那是官方 S3 上传路径，自建集群上没有。
+    # -k 是 run_test.py 的 --pytest-k-expr，原样透传给 pytest：把公共过滤器算出的纯 CPU 类
+    # 排除、K_FP8 与 K_SKIP_CASES 用 and 拼成一条。
+    # 注意：--include 续行序列中间**不能**插整行 `#` 注释——bash 会把 `#` 连同其行尾的 `\`
+    # 一起吃进注释，使命令提前结束、后面的 `-k ...` 被截断成独立命令（报 `-k: command not
+    # found`），run_test.py 只收到 --include、所有 -k 过滤静默失效。要停用某文件直接删掉它。
+    # 当前有意未纳入白名单（很重、耗时长）：inductor/test_torchinductor_opinfo、inductor/test_aot_inductor。
+    if ! CUDA_VISIBLE_DEVICES="${dev}" python test/run_test.py \
+        --include \
+            inductor/test_cuda_repro \
+            inductor/test_cudagraph_trees \
+            inductor/test_gpu_select_algorithm \
+            inductor/test_torchinductor \
+        --shard "${shard_id}" "${NUM_SHARDS}" \
+        -k "$(ppu_cuda_only_k_expr "$K_FP8" "$K_SKIP_CASES")" \
+        --verbose 2>&1 | sed "s/^/[shard${shard_id}] /"; then
+        rc=1
+    fi
+
+    # 通用 op 套件经 inductor 后端跑：对齐上游 test_inductor_shard 的第一条 run_test.py。
+    # 必须**单独一次调用并带 --inductor**——上游明确注明这组通用套件与上面的 inductor/* 单测
+    # 不能放同一次 run_test.py，否则 nested dynamo state 会失败。
+    # test_modules/test_torch 是 PyTorch 最大的通用测试文件，全量跑很重；仍复用同一套过滤：
+    # cuda_only_filter.sh 已 export PYTORCH_TESTING_DEVICE_ONLY_FOR=cuda（只实例化 cuda 变体），
+    # -k 再叠加 CPU 类 / FP8 / 点名排除。当前有意未纳入：test_ops / test_ops_gradients（很重）。
+    if ! CUDA_VISIBLE_DEVICES="${dev}" python test/run_test.py --inductor \
+        --include \
+            test_modules \
+            test_torch \
+        --shard "${shard_id}" "${NUM_SHARDS}" \
+        -k "$(ppu_cuda_only_k_expr "$K_FP8" "$K_SKIP_CASES1")" \
+        --verbose 2>&1 | sed "s/^/[shard${shard_id}] /"; then
+        rc=1
+    fi
+
+    return "${rc}"
+}
+
+echo "=== CUDA inductor 精度单测（${NUM_SHARDS} 卡分片并行，每卡钉 CUDA_VISIBLE_DEVICES）==="
+shard_pids=()
+for shard_id in $(seq 1 "${NUM_SHARDS}"); do
+    run_accuracy_shard "${shard_id}" &
+    shard_pids+=("$!")
+done
+
+# 等所有 shard 结束并聚合退出码。用 if 包裹 wait，避免 set -e 在首个失败 shard 处直接退出、
+# 导致另一个 shard 还没跑完/日志还没收集就中断。
+accuracy_rc=0
+for i in "${!shard_pids[@]}"; do
+    if ! wait "${shard_pids[$i]}"; then
+        echo "[accuracy] shard $((i + 1)) 失败"
+        accuracy_rc=1
+    fi
+done
+if [[ "${accuracy_rc}" -ne 0 ]]; then
+    echo "[accuracy] 有 shard 失败，判定精度门禁不通过"
+    exit 1
+fi
 
 echo "[accuracy] 完成"

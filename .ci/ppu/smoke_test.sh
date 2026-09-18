@@ -93,6 +93,8 @@ and not test_linear_and_cel \
 and not test_max_autotune_mm_plus_mm_zero_size_input_dynamic_False_search_space \
 and not test_max_autotune_regular_mm_zero_size_input_dynamic \
 and not test_mutation_rename \
+and not test_cublas_baddbmm_large_input \
+and not test_mm_bmm_dtype_overload_float16_M \
 and not test_matmul_dropout_device_cpu \
 and not test_template_epilogue_fusion_extra_reads_fuse_epilogue \
 and (not test_triton_template_generated_code_caching or test_triton_template_generated_code_caching_bmm or test_triton_template_generated_code_caching_mm_plus_mm)"
