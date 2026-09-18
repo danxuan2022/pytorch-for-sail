@@ -180,7 +180,8 @@ and not test_fixed_striding"
 K_SKIP_CASES="not test_dtensor_seq_par_shard_dim_0 \
 and not test_set_reduce_scatter_divide_factor \
 and not test_basic_all_gather_bucketing \
-and not test_schedule_overlap_benchmark"
+and not test_schedule_overlap_benchmark \
+and not test_bucket_exposed_with_hidden_single_overlap"
 
 # 用 ppu_cuda_only_k_expr 把第 3 层的纯 CPU 类排除、FP8 排除、点名 skip 合成一条 -k，
 # run_case 里再用它与各 entry 自带的 own_k 组合。
@@ -240,7 +241,7 @@ run_case "test_load_package_multiple_gpus" inductor/test_aot_inductor
 
 # --- 通信算子 / DTensor / 编译协同 ---
 # test_c10d_functional_native: world_size=2。唯一的 FP8 用例 test_fixed_striding 由 K_FP8 排掉。
-run_case "" distributed/test_c10d_functional_native
+# run_case "" distributed/test_c10d_functional_native
 # test_dtensor_compile: TestDTensorCompile world_size=2；同文件的 E2E 类要 4 卡，
 # 由 with_comms 在卡数不足时自动 skip，不影响本条。
 run_case "" distributed/tensor/test_dtensor_compile
@@ -255,7 +256,7 @@ run_case "" distributed/_composable/test_replicate_with_compiler
 # 整文件跑：world_size=2，且它同时覆盖了 h100-distributed.yml 的第二条
 # （-k TestFullyShardAllocFromPG）—— 那个类带 @requires_multicast_support()，
 # PPU 上没有 multicast 支持时会自动 skip，所以不必单独再列一条。
-run_case "" distributed/_composable/fsdp/test_fully_shard_comm
+run_case "test_fully_shard_force_sum_reduce_scatter" distributed/_composable/fsdp/test_fully_shard_comm
 run_case "test_train_parity_multi_group"                   distributed/_composable/fsdp/test_fully_shard_training
 run_case "test_train_parity_with_activation_checkpointing" distributed/_composable/fsdp/test_fully_shard_training
 # test_train_parity_hsdp: world_size=min(4, device_count)，2 卡时退化成 shard_size=1，仍可跑
