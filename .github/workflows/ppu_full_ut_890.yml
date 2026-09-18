@@ -1,7 +1,7 @@
 # P1 full UT gate（890P 板型）: PPU CUDA 全量单元测试，跑在自建 PPU 集群的单卡 pod 上（多分片并行）。
 #
 # 本文件与 ppu_full_ut_810.yml 互为镜像，只差三处：NODE_SELECTOR（板型）、
-# BUILD_WORKFLOW（等哪条编译流水线）、以及 job / step 名里的板型字样。
+# build job 的 board（决定 arch 与 ccache/artifact 名的板型后缀）、以及 job / step 名里的板型字样。
 # 其余内容逐字相同 —— 改一侧必须同步另一侧（diff 两个文件即可确认没漂移）。
 #
 # 执行模型（与 ppu_ci_890.yml 的 smoke / accuracy / perf job 一致）：
@@ -17,24 +17,28 @@
 #   - pod 内实际逻辑见 .ci/ppu/full_ut_test.sh（含仅 CUDA 的两层过滤与 FP8 排除）。
 #
 # 被测的 torch 从哪来：
-#   - 等 ppu_ci_890.yml 在**同一个 commit** 上编出的 whl → 下载它的 artifact →
-#     随源码送进 pod → 在 pod 内 pip install 成功后才跑用例。
-#   - 「等」是轮询 ppu-ci-890 在同一个 head sha 上的 run（这里取 github.sha，
-#     即手动触发时所选 ref 的 tip），而不是用 workflow_run——后者只读默认分支上的
-#     workflow 文件，改本文件的分支上没法自测。
-#   - 因此跑本 workflow 前，所选 ref 上必须已经有一次成功的 ppu-ci-890：
-#       * 该 ref 是某个 PR 的源分支时，PR 自动触发的 build 就以分支 tip 作为 head_sha，
-#         直接命中，无需额外操作；
-#       * 否则先在同一 ref 上手动跑一次 ppu_ci_890.yml（它也有 workflow_dispatch）。
-#         两者先后顺序可以颠倒：先点本 workflow 也行，它会等到 build 出结论为止。
-#     所选 ref 上一次 build 都没有时，会在 WAIT_GRACE_MINUTES 后以明确报错失败。
+#   - 本 run 内先起一个 build job（复用 _ppu_build.yml）编出 whl → 8 个分片 job
+#     needs:build，在同一个 run 内按 artifact 名直接下载 → 随源码送进 pod →
+#     在 pod 内 pip install 成功后才跑用例。不再轮询 ppu-ci 的 run、也不跨 run 拉包。
+#   - 为什么本 workflow 自己编、而不像旧版那样等 ppu-ci 的现成 whl：本 workflow 是手动
+#     触发，跑在它自己的 ref 上（github.sha），而 ppu-ci 是 PR 触发、编的是 PR head sha，
+#     两者的 commit 不一定对得上；自己编能保证「测的源码」与「装的 whl」严格同一个 commit。
+#   - 增量编译：build job 复用 _ppu_build.yml 的 ccache restore。cache key 前缀含分支名
+#     （cache-branch，下面钉成 v2.11.0-for-ci）与板型（board → BUILD_ENVIRONMENT 后缀），所以：
+#       * 手动选 v2.11.0-for-ci → 命中 ppu_refresh_cache.yml 在该分支、该板型上种好的
+#         基线，只增量编改动过的 TU（几十分钟而非冷编 4~5h）；
+#       * 两块板各自的基线互不覆盖（board 后缀不同），本文件只会读到属于自己 board 的那份。
+#     本 workflow 只读缓存不回写（不传 save-ccache，与 ppu_ci_890.yml 一致；回写是
+#     ppu_refresh_cache.yml 的专责，原因见其文件头）。
+#   - 分支作用域：GitHub cache 按分支隔离，v2.11.0-for-ci 的基线只对「跑在该分支或其子分支」的
+#     run 可见。手动 dispatch 需选它（或其子分支），选兄弟分支会因作用域读不到而冷编译——这是预期行为。
 #
 # -----------------------------------------------------------------------------
 # 测试范围：以 periodic.yml + slow.yml 的 case 为模板
 # -----------------------------------------------------------------------------
 # 那两条官方流水线本身只是薄编排层（_linux-build.yml 先编 wheel，_linux-test.yml 再测，
 # 跑在 pytorch 官方云 GPU runner 上，并带 `github.repository_owner == 'pytorch'` 守卫），
-# 这套结构与本仓库「复用 ppu_ci_890.yml 已编好的 whl + 自建 PPU 集群单卡 pod」的
+# 这套结构与本仓库「本 run 内用 _ppu_build.yml 编 whl + 自建 PPU 集群单卡 pod」的
 # 诉求本质互斥，无法照搬其 job / runner 定义。这里复制的是它们的 **test-matrix 语义**：
 #   - periodic.yml 的 linux-jammy-cuda13.0-py3.10-gcc11 里 config: "default"，5 分片
 #   - slow.yml     的 linux-jammy-cuda12.8-py3.10-gcc11-sm86 里 config: "slow"，3 分片
@@ -49,7 +53,7 @@
 #   - jit_legacy(1 分片)：legacy jit executor，恰好是 test_python_shard 用
 #     --exclude-jit-executor 排掉的那批；
 #   - debug-build(7 分片) / slow-gradcheck(8 分片)：需要 debug / slow-gradcheck 两种特殊
-#     编译产物，而本 workflow 复用的是 ppu_ci_890.yml 的常规 release whl，没有这两份包。
+#     编译产物，而本 workflow 的 build job 编的是常规 release whl，没有这两份包。
 #
 # 只跑 CUDA 相关用例 + 过滤 FP8：全部在 .ci/ppu/full_ut_test.sh 里落地，两层过滤——
 #   - 用例级 PYTORCH_TESTING_DEVICE_ONLY_FOR=cuda（官方 CUDA CI 的同一个开关，设备无关的
@@ -60,8 +64,8 @@
 #
 # 触发方式：仅手动（workflow_dispatch）。
 #   全量 UT 是 8 个单卡 pod × 数小时的量级，不适合挂在每个 PR 上自动跑；需要它的时候
-#   在 Actions 页面选一个 ref 手动跑即可。因此本文件不再需要与 ppu_ci_890.yml 对齐
-#   branches / paths（那套约束是为了保证「测试自动触发时编译也一定触发」）。
+#   在 Actions 页面选一个 ref 手动跑即可。选 v2.11.0-for-ci（或其子分支）才能命中该分支、
+#   该板型的 ccache 基线做增量编译，选别的分支会冷编译（见上「被测的 torch 从哪来」）。
 #   另外三条门禁（smoke / accuracy / perf）仍是 pull_request 自动门禁，不受本改动影响。
 #   注意：workflow_dispatch 要求本文件已存在于**默认分支**，Actions 页面才会出现
 #   「Run workflow」按钮与 ref 下拉框。
@@ -69,7 +73,7 @@ name: ppu-full-ut-890
 
 on:
   # 手动触发：在 Actions 页面选 ref（分支或标签）。github.sha 即该 ref 的 tip，
-  # 下面 wait-build 关联 build run、各分片 checkout 源码全部以它为准。
+  # build job 编它、各分片 checkout 源码全部以它为准（同一个 commit，源码与 whl 严格对应）。
   workflow_dispatch:
 
 concurrency:
@@ -82,12 +86,12 @@ concurrency:
 
 permissions:
   contents: read
-  # 轮询 ppu-ci-890 的 run 状态、以及跨 run 下载它的 whl artifact 都需要
+  # build job 里 _ppu_build.yml 用 actions/cache 读写 ccache，需要 actions: read
   actions: read
 
 env:
-  # PPU 基础镜像：python3.12 + CUDA13 + PPU SDK + triton，不含 torch —— torch 由
-  # ppu-ci-890 的 whl 提供。刻意与 _ppu_build.yml 的 docker-image 默认值用同一个 tag：
+  # PPU 基础镜像：python3.12 + CUDA13 + PPU SDK + triton，不含 torch —— torch 由本 run 的
+  # build job 编出的 whl 提供。刻意与 _ppu_build.yml 的 docker-image 默认值用同一个 tag：
   # 编译与运行同镜像，才不会出现 whl 与镜像里 SDK / 工具链对不上的问题。
   # 前置要求：该镜像须已预拉到 NODE_SELECTOR 指定板型的节点上，否则 pod 会卡在拉取阶段直至超时。
   IMAGE: pkg.flytiger-eco.com/docker_release/ppu:v2.1.1-cuda13.0-ubuntu24-py312
@@ -95,7 +99,7 @@ env:
   HOST_VOLUMES: "/nas_aisw:/nas_aisw,/wl_nas:/mnt/wl_nas"
   # action 在 pod 内解压源码的路径（也是 action 的默认值，这里显式写出便于 command 引用）
   SOURCE_DIR: /workspace/source
-  # 本文件是 890P 那一套：被测的是 ppu-ci-890 编出的 arch 8.9 whl，必须钉在 890P 上。
+  # 本文件是 890P 那一套：被测的是本 run 的 build job 编出的 arch 8.9 whl，必须钉在 890P 上。
   # 容量现实：集群里 890P 有 16 台（每台 8 PPU），本 workflow 一次起 8 个单卡 pod 也能
   # 散到多台机器上并行；810 那一套就没这个福利（810E 只有 1 台，8 个分片会全压在一台上）。
   NODE_SELECTOR: "board-type=ZW-M890P"
@@ -110,202 +114,34 @@ env:
   # 分片会全部在装 triton 这一步失败（每个分片是独立 pod，各自装一次）。
   # 四条测试门禁（smoke 除外）共用同一个版本号，改一侧就要同步改另几侧。
   TRITON_VERSION: "3.6.0"
-  # 依赖的编译门禁：按 workflow 文件名找它在同一个 head sha 上的 run
-  BUILD_WORKFLOW: ppu_ci_890.yml
   # whl 落地目录（相对源码根）。必须在源码树内，且不能被 .gitignore 命中：
   # 它要靠 ppu-distributed-action 打包源码一起送进 pod，而 dist/ 在 .gitignore 里，
   # 按 gitignore 过滤的打包方式会把它整个丢掉。
   WHEEL_DIR_REL: .ci/ppu/wheelhouse
-  # 等 build 的上限。这是**兜底**而不是正常退出路径：正常情况下等待由 build 是否产出 whl
-  # artifact 终止 —— build 一上传 whl 就往下走；build 失败、或它自己撞上 job 超时后该 run
-  # 结束且始终没有 whl artifact，会立刻命中「未产出 whl」分支快速失败。
-  # 所以这个值必须严格大于 build 自己的 job 上限，否则会出现「build 还在正常编、全量 UT 先
-  # 判超时」的假失败：whl 最终编出来了，却没有任何门禁测它，只能手动重跑。
-  # 取值 = 350 + 40：
-  #   - 350 是 build 的硬上限（ppu_ci_890.yml 不传 timeout-minutes，取 _ppu_build.yml
-  #     的默认值 350，覆盖冷编译 4~5h 的情况）。改那个默认值必须同步改这里。
-  #   - 40 是排队余量：build 的 350 分钟从它真正开始执行才计时，而等待步骤的秒表从 run 创建
-  #     就开始跑，等 x86-ubuntu2404-8-32 空闲的 queued 时间只算在本侧。
-  WAIT_TIMEOUT_MINUTES: "390"
-  # 轮询间隔取 120s：GITHUB_TOKEN 的 REST 配额是每仓库每小时 1000 次。合并后的 PR 门禁
-  # （ppu-ci 的 smoke / accuracy / perf / distribute）已改用 needs:build、不再轮询；本
-  # workflow 是仅存的轮询方，仍把它收敛到独立的 wait-build 这一个 job（8 个测试分片靠
-  # needs 复用它的输出，不各自轮询），配合 120s 间隔，把本侧请求量压到 ~30 次/小时。
-  WAIT_POLL_SECONDS: "120"
-  # 「一个 build run 都还没出现」的宽限期。手动触发的常态是 build 已经跑完，首轮查询
-  # 就能命中；这个宽限期留给「先点 full-ut、再去点 build」的情况（给人几分钟去点那一下）。
-  # 超过它还查不到，基本就是所选 ref 上压根没编过包，早失败早暴露。
-  WAIT_GRACE_MINUTES: "15"
-  # 轮询期间容忍的「连续」查询失败次数。自建 runner 出网走代理，调 api.github.com 偶发
-  # `RequestError: fetch failed`（octokit 把网络层错误一律记成 status 500）。轮询要持续
-  # 几小时、几百次请求，一次抖动就让整个 job 白等是不可接受的，所以只在连续失败到这个
-  # 次数（× WAIT_POLL_SECONDS ≈ 20 分钟持续不通）才判定为真故障。查询成功即清零。
-  WAIT_MAX_API_FAILURES: "10"
 
 jobs:
   # ---------------------------------------------------------------------------
-  # 只做一件事：等本 ref 的 whl 编好，把 build 的 run-id 交给下面的测试分片。
-  #
-  # 为什么单独拆一个 job：本 workflow 手动触发、复用别的 run 编出的 whl，只能轮询 ppu-ci
-  # 的 run 并等它的 build 产物（不像 ppu-ci 的 4 条 PR 门禁与 build 同 run、可直接 needs:build）。
-  #   - 本 workflow 有 8 个测试分片。若把「等待」内联进每个分片，
-  #     就是 8 份秒表同时轮询 api.github.com 数小时，白烧 GITHUB_TOKEN 的每小时配额；
-  #   - 而且那 8 个 job 会在整个编译期间一直占着 k8s-runner-group-cpu-flytiger 的 runner
-  #     槽位干等，把同期其它 workflow 挤在 queued。
-  #   - 拆开后编译期只占 1 个槽位，whl 就绪才由 needs 放行 8 个分片。
-  #   下载 whl 没法这样共享：ppu-distributed-action 打包的是**各 job 自己 workspace 里的
-  #   源码树**，whl 必须落在每个分片的 workspace 内，所以下载仍然是每个分片各做一次。
+  # 编 whl（复用 workflow）。与 ppu_ci_890.yml 的 build job 逐字同构，只差 board：
+  #   - board 决定目标 arch 与 ccache/artifact 名里的板型后缀（board→arch 映射唯一写在
+  #     _ppu_build.yml），本文件传自己那一套的板型。
+  #   - 镜像 / 环境标识前缀一律用 _ppu_build.yml 的默认值，保证与 ppu_refresh_cache.yml 在
+  #     v2.11.0-for-ci 上按板型种好的基线算出同一个 cache key 前缀，从而命中做增量编译。
+  #   - cache-branch 显式钉成 v2.11.0-for-ci：本 workflow 是手动触发、没有 PR 的 base.ref，
+  #     不钉就会退回 github.ref_name（从别的分支 dispatch 时前缀会漂）；钉死后 key 前缀恒指向
+  #     v2.11.0-for-ci 的基线。两块板共用这个分支名，靠 board 后缀区分各自基线、互不覆盖。
+  #   - 不传 save-ccache：默认 false，本 workflow 只读缓存不回写（回写是 ppu_refresh_cache.yml
+  #     的专责，原因见其文件头）。
+  #   - 分支作用域：GitHub cache 按分支隔离，一个 run 只能读到「自身 ref / base 分支 / 默认分支」
+  #     三个 scope。所以 key 前缀钉对还不够，本 run 还须跑在 v2.11.0-for-ci（或其子分支）上才读
+  #     得到那份基线：手动 dispatch 时需选它（或其子分支），选兄弟分支会因作用域读不到而冷编译。
+  # 产物：artifact ppu-wheel-<env>-<board>-<commit>，名由 outputs.artifact-name 透出给下面的分片。
   # ---------------------------------------------------------------------------
-  wait-build:
-    name: 等待 ppu-ci-890
-    runs-on: k8s-runner-group-cpu-flytiger
-    container:
-      image: ghcr.io/actions/actions-runner:latest
-    # 略大于 WAIT_TIMEOUT_MINUTES(390)：否则秒表还没到点、job 先被砍，日志里只剩一条没有
-    # 任何原因说明的 job 超时。
-    # 注：6 小时 job 上限只约束 GitHub 托管 runner，本 job 在自建 ARC runner 上不受该限制。
-    timeout-minutes: 400
-    outputs:
-      run-id: ${{ steps.wait-build.outputs.run-id }}
-      run-url: ${{ steps.wait-build.outputs.run-url }}
-
-    steps:
-      # 本 job 不需要 checkout：github-script 只调 REST API，不读源码。
-      #
-      # 下面这段 script 是 full_ut 独有的：合并后的 ppu-ci PR 门禁与 build 同 run、用
-      # needs:build 直接拿产物，已不再轮询；只有本 workflow（手动触发、复用别的 run 的 whl）
-      # 还需要轮询 ppu-ci 的 run 并等它的 build job 产出 whl artifact。
-      #   - HEAD_SHA 取 github.sha（手动触发时所选 ref 的 tip）；
-      #   - 判定「有 whl 可用」不看 run 的 conclusion（它掺了测试 job 的结果），只看 build
-      #     是否已上传 ppu-wheel-* artifact（build 一完成即可用，此时测试可能还在跑）。
-      #
-      # 为什么不抽成 composite action：本 job 跑在 ARC(Actions Runner Controller) 自建
-      # runner 上且带 container，ARC 的 k8s hook 把 workspace 拷进 job 容器，runner 进程
-      # 自己看不到 checkout 的结果 —— `uses: ./.github/actions/xxx` 必然报
-      # "Can't find 'action.yml' ... Did you forget to run actions/checkout"，即便
-      # checkout 成功。改写成 owner/repo/.github/actions/xxx@ref 也不行：uses 不支持
-      # 表达式，ref 只能写死，而改 action 的 PR 就没法自测自己那一版。
-      - name: 等待 ppu-ci-890 编译完成
-        id: wait-build
-        # 只调 REST API，不占 PPU 卡；pod 要到真正跑用例那一步才拉起
-        uses: actions/github-script@v7
-        env:
-          # workflow_dispatch 下 github.sha 就是所选 ref 的 tip（没有 PR 那种 merge commit），
-          # 而 ppu-ci-890 的 run 无论由 pull_request 还是 workflow_dispatch 创建，head_sha
-          # 都是被编的那个 commit，所以用它做关联键（也与下面测试分片 checkout 的 ref 一致）。
-          # 仍然经 env 传而不在 script 里读 context.payload：ARC + container 下 github-script
-          # 读不到 GITHUB_EVENT_PATH 指向的 event.json，payload 会静默变成 {}。
-          # （context.repo 不受影响：它读的是 GITHUB_REPOSITORY 环境变量。）
-          HEAD_SHA: ${{ github.sha }}
-        with:
-          # 单次请求内部也重试（octokit retry 插件），先扛掉最短的网络抖动；
-          # 连续多轮都失败才由下面的 apiFailures 计数判定为真故障。
-          retries: 3
-          script: |
-            const workflow = process.env.BUILD_WORKFLOW;
-            const headSha = process.env.HEAD_SHA;
-            const pollMs = Number(process.env.WAIT_POLL_SECONDS) * 1000;
-            const timeoutMs = Number(process.env.WAIT_TIMEOUT_MINUTES) * 60 * 1000;
-            const graceMs = Number(process.env.WAIT_GRACE_MINUTES) * 60 * 1000;
-            const maxApiFailures = Number(process.env.WAIT_MAX_API_FAILURES);
-            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-            const startedAt = Date.now();
-            let apiFailures = 0;
-
-            core.info(`[wait] 目标: ${workflow} @ head_sha=${headSha}`);
-            while (true) {
-              const waited = Date.now() - startedAt;
-              const waitedMin = Math.round(waited / 60000);
-
-              // 超时判定放在循环开头：下面查询失败时会 continue，放在尾部会被跳过
-              if (waited > timeoutMs) {
-                core.setFailed(
-                  `[wait] 超时：等 ${workflow} 超过 ${process.env.WAIT_TIMEOUT_MINUTES} 分钟仍无结论。` +
-                  '这个上限已高于 build 自己的 job 超时，所以「编译慢」不会走到这里：' +
-                  '大概率那个 run 长期卡在 queued（没有空闲编译 runner）。'
-                );
-                return;
-              }
-
-              let runs;
-              let wheelRun = null;
-              try {
-                const { data } = await github.rest.actions.listWorkflowRuns({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  workflow_id: workflow,
-                  head_sha: headSha,
-                  per_page: 20,
-                });
-                runs = data.workflow_runs;
-                // 合并后 build 与 4 条测试 job 同属一个 ppu-ci run，run 的 conclusion 会掺进
-                // 测试结果，所以不看 conclusion，只看 build 是否已上传 whl artifact——
-                // build 一完成产物就可用（此时测试 job 可能还在跑，full_ut 只要 whl，可更早开跑）。
-                for (const r of runs) {
-                  const arts = await github.rest.actions.listWorkflowRunArtifacts({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    run_id: r.id,
-                    per_page: 100,
-                  });
-                  if (arts.data.artifacts.some((a) => a.name.startsWith('ppu-wheel-') && !a.expired)) {
-                    wheelRun = r;
-                    break;
-                  }
-                }
-                apiFailures = 0;
-              } catch (error) {
-                // 不能让单次网络抖动掀掉整个 job：那意味着已经等掉的几小时编译白费，
-                // 且 PR 门禁会以一个与被测代码无关的原因变红。
-                apiFailures += 1;
-                if (apiFailures >= maxApiFailures) {
-                  core.setFailed(
-                    `[wait] 连续 ${apiFailures} 次查询 ${workflow} 的 run 失败，放弃等待：` +
-                    `${error.status || ''} ${error.message}\n` +
-                    'runner 到 api.github.com 的网络（出网代理）大概率有问题，不是编译本身失败。'
-                  );
-                  return;
-                }
-                core.warning(
-                  `[wait] 查询 run 失败（连续第 ${apiFailures}/${maxApiFailures} 次），` +
-                  `${process.env.WAIT_POLL_SECONDS}s 后重试: ${error.status || ''} ${error.message}`
-                );
-                await sleep(pollMs);
-                continue;
-              }
-
-              // 同一个 sha 上可能既有 pull_request 触发的 run、又有手动触发 / 重跑的，
-              // 任一 run 已产出 whl artifact 即可用
-              if (wheelRun) {
-                core.info(`[wait] whl 已就位（等待 ${waitedMin} 分钟）: ${wheelRun.html_url}`);
-                core.setOutput('run-id', String(wheelRun.id));
-                core.setOutput('run-url', wheelRun.html_url);
-                return;
-              }
-
-              const pending = runs.find((r) => r.status !== 'completed');
-              if (pending) {
-                core.info(`[wait] 编译中 (${pending.status})，已等 ${waitedMin} 分钟: ${pending.html_url}`);
-              } else if (runs.length > 0) {
-                // 全部 completed 且都没产出 whl artifact：再等也不会有，直接失败
-                core.setFailed(
-                  `[wait] ${workflow} 的 run 均已结束且未产出 whl artifact: ${runs[0].html_url}\n` +
-                  '大概率 build job 失败了。先修好编译，再重跑本 workflow。'
-                );
-                return;
-              } else if (waited > graceMs) {
-                core.setFailed(
-                  `[wait] 等了 ${waitedMin} 分钟仍找不到 ${workflow} 在 ${headSha} 上的 run。\n` +
-                  '本 workflow 是手动触发的，只用所选 ref 上编出来的 whl：请先在同一个 ref 上跑一次 ' +
-                  'ppu_ci_890.yml（Actions → ppu-ci-890 → Run workflow），再重跑本 workflow。'
-                );
-                return;
-              } else {
-                core.info(`[wait] 还没查到 build run，宽限期内继续等（已等 ${waitedMin} 分钟）`);
-              }
-
-              await sleep(pollMs);
-            }
+  build:
+    uses: ./.github/workflows/_ppu_build.yml
+    with:
+      board: "890"
+      cache-branch: v2.11.0-for-ci
+      upload-wheel: true
 
   # ---------------------------------------------------------------------------
   # 全量 UT 分片：8 个独立 job，每个一个单卡 PPU pod。
@@ -340,7 +176,9 @@ jobs:
   # 完整的失败清单（全量 UT 的价值所在），而不是一个分片先红就取消其余 7 个。
   #
   # 代价是下面 8 段 YAML 几乎逐字重复。GHA 不支持 YAML anchor，而抽成本仓库的 composite
-  # action 在 ARC + container 下不可用（理由见 wait-build 里那段注释），只能物理重复。
+  # action 在 ARC + container 下不可用（ARC 的 k8s hook 把 workspace 拷进 job 容器，runner
+  # 进程自己看不到 checkout 结果，`uses: ./.github/actions/xxx` 必报 "Can't find action.yml"），
+  # 只能物理重复。
   # 8 段之间**只允许**这几处不同，其余必须逐字一致：
   #   - job key：必须前 20 字符就唯一（submit.sh 会把 job 名截到 20 字符去拼 pod 名）
   #   - name: 里的 config 与分片标签（run 页面上区分 8 个分片就靠它）
@@ -348,12 +186,12 @@ jobs:
   # ---------------------------------------------------------------------------
   ut-default-1:
     name: "ppu-full-ut default 1/5 (890P 单卡)"
-    needs: wait-build
+    needs: build
     runs-on: k8s-runner-group-cpu-flytiger
     container:
       image: ghcr.io/actions/actions-runner:latest
     # = 本分片的 pod 超时上限(480) + checkout/下载 whl/pod 启动与打包余量(60)。
-    # 等 build 的时间不算在本 job 里（已由 wait-build 承担），所以不需要再叠 390。
+    # 等 build 的时间不算在本 job 里（已由 needs:build 承担），所以不需要再叠编译时长。
     # slow 档的 pod 超时更短(300)，但 job 上限统一给 540，方便 8 段保持一致。
     # 注：6 小时 job 上限只约束 GitHub 托管 runner，本 job 在自建 ARC runner 上不受该限制。
     timeout-minutes: 540
@@ -367,7 +205,8 @@ jobs:
       # 等掉了几小时编译，一个分片在 clone 上挂了就要重跑一轮八小时级的全量 UT。
       # GHA 的 step 没有 retry 键（只有 continue-on-error / timeout-minutes），想重试一个
       # uses 步骤就只能再写一个 step，upstream 的 .github/actions/checkout-pytorch/action.yml
-      # 也是这么干的（那个 action 在 ARC + container 下用不了，见 wait-build 那段注释）。
+      # 也是这么干的（那个 action 在 ARC + container 下用不了：ARC 的 k8s hook 把 workspace
+      # 拷进 job 容器，runner 进程看不到 checkout 结果）。
       # 不需要手动清场（与 whl 不同）：checkout 发现目录里的 .git 无效或 remote 对不上时会
       # 自己清空目录重新 clone，半个 .git 也能被下一次 fetch 续上。
       # 三段的 with: 必须逐字一致，否则重试会签出与第一次不同的东西。
@@ -380,8 +219,8 @@ jobs:
         continue-on-error: true
         uses: actions/checkout@v4
         with:
-          # 显式钉在 github.sha（= 手动触发时所选 ref 的 tip）：必须与 wait-build 里用来关联
-          # build run 的那个 sha 一致，否则测的源码与装上的 whl 不是同一个 commit
+          # 显式钉在 github.sha（= 手动触发时所选 ref 的 tip）：与 build job 编的是同一个
+          # commit，否则测的源码与装上的 whl 不是同一个 commit
           ref: ${{ github.sha }}
           # 只跑 python 测试，不需要 third_party 子模块；浅克隆加速，也减小传到 NAS 的包体积
           fetch-depth: 1
@@ -413,31 +252,24 @@ jobs:
           fetch-depth: 1
 
       # -----------------------------------------------------------------------
-      # 下载分三次写：download-artifact 没有 retries 输入（github-script 的 retries 只作用于
-      # wait-build 那一步），而这一步要跨 run 拉一个几百 MB 的 zip，自建 runner 出网走代理，偶发
+      # 下载本 run 的 build job 上传的 whl → 校验。build 就在同一个 run 里（needs:build 已保证
+      # 它先完成），不必轮询、也不必给 run-id + token —— 按 needs.build 透出的 artifact 名直接取。
+      # 仍分三次写：download-artifact 没有 retries 输入，而这一步要拉一个几百 MB 的 zip，自建
+      #   runner 出网走代理，偶发
       #   Unable to download artifact(s): ... tunneling socket could not be established,
       #   cause=getaddrinfo ENOTFOUND <proxy>
-      # 也就是代理域名一时解析不出来。走到这一步时已经等掉了几小时编译，为一次 DNS 抖动把
-      # 门禁判红、要人手动重跑是不可接受的（与 wait-build 里 apiFailures 容忍连续失败同一个
-      # 理由），所以前两次 continue-on-error、用 outcome 串成「失败才重试」，最后一次不兜着——
-      # 真的连不通就该失败。
-      #
-      # 以下四步（下载 ×3 + 校验）与 ppu_ci_890.yml 的 smoke / accuracy / perf job 里的
-      # 对应步骤等价，只是 run-id 取自 needs.wait-build 而不是本 job 内的 steps.wait-build。
+      # 为一次 DNS 抖动把门禁判红、要人手动重跑是不可接受的，所以前两次 continue-on-error、
+      # 用 outcome 串成「失败才重试」，最后一次不兜着——真的连不通就该失败。
       # -----------------------------------------------------------------------
       - name: 下载 whl artifact
         id: download-wheel
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          # artifact 名形如 ppu-wheel-<env>-<commit>（见 _ppu_build.yml 的 Collect wheel 步骤），
-          # 这里按前缀取，不在两边各写一份命名规则
-          pattern: ppu-wheel-*
-          merge-multiple: true
+          # 按 needs.build 透出的 artifact 名精确取（形如 ppu-wheel-<env>-<board>-<commit>，命名规则
+          # 只在 _ppu_build.yml 的 Collect wheel 步骤里有一份），同 run 内下载不用给 run-id/token。
+          name: ${{ needs.build.outputs.artifact-name }}
           path: ${{ env.WHEEL_DIR_REL }}
-          # 跨 run 下载必须显式给 run-id + token（默认只在当前 run 内找）
-          run-id: ${{ needs.wait-build.outputs.run-id }}
-          github-token: ${{ github.token }}
 
       - name: 重试前清场 (1)
         if: steps.download-wheel.outcome == 'failure'
@@ -456,11 +288,8 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          pattern: ppu-wheel-*
-          merge-multiple: true
+          name: ${{ needs.build.outputs.artifact-name }}
           path: ${{ env.WHEEL_DIR_REL }}
-          run-id: ${{ needs.wait-build.outputs.run-id }}
-          github-token: ${{ github.token }}
 
       - name: 重试前清场 (2)
         if: steps.download-wheel.outcome == 'failure' && steps.download-wheel-retry-1.outcome == 'failure'
@@ -475,18 +304,15 @@ jobs:
         if: steps.download-wheel.outcome == 'failure' && steps.download-wheel-retry-1.outcome == 'failure'
         uses: actions/download-artifact@v4
         with:
-          pattern: ppu-wheel-*
-          merge-multiple: true
+          name: ${{ needs.build.outputs.artifact-name }}
           path: ${{ env.WHEEL_DIR_REL }}
-          run-id: ${{ needs.wait-build.outputs.run-id }}
-          github-token: ${{ github.token }}
 
       - name: 校验 whl 已就位
         env:
           # 用相对路径：${{ github.workspace }} 求值出的是 runner 自己的路径
           # (/home/runner/_work/...)，而本步骤跑在 container 里看到的是挂载点 (/__w/...)
           WHEEL_DIR: ${{ env.WHEEL_DIR_REL }}
-          BUILD_RUN_URL: ${{ needs.wait-build.outputs.run-url }}
+          BUILD_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           UT_CONFIG: default
           SHARD_LABEL: "1/5"
         run: |
@@ -560,7 +386,7 @@ jobs:
   # 全部见 ut-default-1 里的注释，改一处必须同步改这 8 段。
   ut-default-2:
     name: "ppu-full-ut default 2/5 (890P 单卡)"
-    needs: wait-build
+    needs: build
     runs-on: k8s-runner-group-cpu-flytiger
     container:
       image: ghcr.io/actions/actions-runner:latest
@@ -605,11 +431,8 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          pattern: ppu-wheel-*
-          merge-multiple: true
+          name: ${{ needs.build.outputs.artifact-name }}
           path: ${{ env.WHEEL_DIR_REL }}
-          run-id: ${{ needs.wait-build.outputs.run-id }}
-          github-token: ${{ github.token }}
 
       - name: 重试前清场 (1)
         if: steps.download-wheel.outcome == 'failure'
@@ -625,11 +448,8 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          pattern: ppu-wheel-*
-          merge-multiple: true
+          name: ${{ needs.build.outputs.artifact-name }}
           path: ${{ env.WHEEL_DIR_REL }}
-          run-id: ${{ needs.wait-build.outputs.run-id }}
-          github-token: ${{ github.token }}
 
       - name: 重试前清场 (2)
         if: steps.download-wheel.outcome == 'failure' && steps.download-wheel-retry-1.outcome == 'failure'
@@ -643,16 +463,13 @@ jobs:
         if: steps.download-wheel.outcome == 'failure' && steps.download-wheel-retry-1.outcome == 'failure'
         uses: actions/download-artifact@v4
         with:
-          pattern: ppu-wheel-*
-          merge-multiple: true
+          name: ${{ needs.build.outputs.artifact-name }}
           path: ${{ env.WHEEL_DIR_REL }}
-          run-id: ${{ needs.wait-build.outputs.run-id }}
-          github-token: ${{ github.token }}
 
       - name: 校验 whl 已就位
         env:
           WHEEL_DIR: ${{ env.WHEEL_DIR_REL }}
-          BUILD_RUN_URL: ${{ needs.wait-build.outputs.run-url }}
+          BUILD_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           UT_CONFIG: default
           SHARD_LABEL: "2/5"
         run: |
@@ -704,7 +521,7 @@ jobs:
 
   ut-default-3:
     name: "ppu-full-ut default 3/5 (890P 单卡)"
-    needs: wait-build
+    needs: build
     runs-on: k8s-runner-group-cpu-flytiger
     container:
       image: ghcr.io/actions/actions-runner:latest
@@ -749,11 +566,8 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          pattern: ppu-wheel-*
-          merge-multiple: true
+          name: ${{ needs.build.outputs.artifact-name }}
           path: ${{ env.WHEEL_DIR_REL }}
-          run-id: ${{ needs.wait-build.outputs.run-id }}
-          github-token: ${{ github.token }}
 
       - name: 重试前清场 (1)
         if: steps.download-wheel.outcome == 'failure'
@@ -769,11 +583,8 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          pattern: ppu-wheel-*
-          merge-multiple: true
+          name: ${{ needs.build.outputs.artifact-name }}
           path: ${{ env.WHEEL_DIR_REL }}
-          run-id: ${{ needs.wait-build.outputs.run-id }}
-          github-token: ${{ github.token }}
 
       - name: 重试前清场 (2)
         if: steps.download-wheel.outcome == 'failure' && steps.download-wheel-retry-1.outcome == 'failure'
@@ -787,16 +598,13 @@ jobs:
         if: steps.download-wheel.outcome == 'failure' && steps.download-wheel-retry-1.outcome == 'failure'
         uses: actions/download-artifact@v4
         with:
-          pattern: ppu-wheel-*
-          merge-multiple: true
+          name: ${{ needs.build.outputs.artifact-name }}
           path: ${{ env.WHEEL_DIR_REL }}
-          run-id: ${{ needs.wait-build.outputs.run-id }}
-          github-token: ${{ github.token }}
 
       - name: 校验 whl 已就位
         env:
           WHEEL_DIR: ${{ env.WHEEL_DIR_REL }}
-          BUILD_RUN_URL: ${{ needs.wait-build.outputs.run-url }}
+          BUILD_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           UT_CONFIG: default
           SHARD_LABEL: "3/5"
         run: |
@@ -848,7 +656,7 @@ jobs:
 
   ut-default-4:
     name: "ppu-full-ut default 4/5 (890P 单卡)"
-    needs: wait-build
+    needs: build
     runs-on: k8s-runner-group-cpu-flytiger
     container:
       image: ghcr.io/actions/actions-runner:latest
@@ -893,11 +701,8 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          pattern: ppu-wheel-*
-          merge-multiple: true
+          name: ${{ needs.build.outputs.artifact-name }}
           path: ${{ env.WHEEL_DIR_REL }}
-          run-id: ${{ needs.wait-build.outputs.run-id }}
-          github-token: ${{ github.token }}
 
       - name: 重试前清场 (1)
         if: steps.download-wheel.outcome == 'failure'
@@ -913,11 +718,8 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          pattern: ppu-wheel-*
-          merge-multiple: true
+          name: ${{ needs.build.outputs.artifact-name }}
           path: ${{ env.WHEEL_DIR_REL }}
-          run-id: ${{ needs.wait-build.outputs.run-id }}
-          github-token: ${{ github.token }}
 
       - name: 重试前清场 (2)
         if: steps.download-wheel.outcome == 'failure' && steps.download-wheel-retry-1.outcome == 'failure'
@@ -931,16 +733,13 @@ jobs:
         if: steps.download-wheel.outcome == 'failure' && steps.download-wheel-retry-1.outcome == 'failure'
         uses: actions/download-artifact@v4
         with:
-          pattern: ppu-wheel-*
-          merge-multiple: true
+          name: ${{ needs.build.outputs.artifact-name }}
           path: ${{ env.WHEEL_DIR_REL }}
-          run-id: ${{ needs.wait-build.outputs.run-id }}
-          github-token: ${{ github.token }}
 
       - name: 校验 whl 已就位
         env:
           WHEEL_DIR: ${{ env.WHEEL_DIR_REL }}
-          BUILD_RUN_URL: ${{ needs.wait-build.outputs.run-url }}
+          BUILD_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           UT_CONFIG: default
           SHARD_LABEL: "4/5"
         run: |
@@ -992,7 +791,7 @@ jobs:
 
   ut-default-5:
     name: "ppu-full-ut default 5/5 (890P 单卡)"
-    needs: wait-build
+    needs: build
     runs-on: k8s-runner-group-cpu-flytiger
     container:
       image: ghcr.io/actions/actions-runner:latest
@@ -1037,11 +836,8 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          pattern: ppu-wheel-*
-          merge-multiple: true
+          name: ${{ needs.build.outputs.artifact-name }}
           path: ${{ env.WHEEL_DIR_REL }}
-          run-id: ${{ needs.wait-build.outputs.run-id }}
-          github-token: ${{ github.token }}
 
       - name: 重试前清场 (1)
         if: steps.download-wheel.outcome == 'failure'
@@ -1057,11 +853,8 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          pattern: ppu-wheel-*
-          merge-multiple: true
+          name: ${{ needs.build.outputs.artifact-name }}
           path: ${{ env.WHEEL_DIR_REL }}
-          run-id: ${{ needs.wait-build.outputs.run-id }}
-          github-token: ${{ github.token }}
 
       - name: 重试前清场 (2)
         if: steps.download-wheel.outcome == 'failure' && steps.download-wheel-retry-1.outcome == 'failure'
@@ -1075,16 +868,13 @@ jobs:
         if: steps.download-wheel.outcome == 'failure' && steps.download-wheel-retry-1.outcome == 'failure'
         uses: actions/download-artifact@v4
         with:
-          pattern: ppu-wheel-*
-          merge-multiple: true
+          name: ${{ needs.build.outputs.artifact-name }}
           path: ${{ env.WHEEL_DIR_REL }}
-          run-id: ${{ needs.wait-build.outputs.run-id }}
-          github-token: ${{ github.token }}
 
       - name: 校验 whl 已就位
         env:
           WHEEL_DIR: ${{ env.WHEEL_DIR_REL }}
-          BUILD_RUN_URL: ${{ needs.wait-build.outputs.run-url }}
+          BUILD_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           UT_CONFIG: default
           SHARD_LABEL: "5/5"
         run: |
@@ -1136,7 +926,7 @@ jobs:
 
   ut-slow-1:
     name: "ppu-full-ut slow 1/3 (890P 单卡)"
-    needs: wait-build
+    needs: build
     runs-on: k8s-runner-group-cpu-flytiger
     container:
       image: ghcr.io/actions/actions-runner:latest
@@ -1181,11 +971,8 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          pattern: ppu-wheel-*
-          merge-multiple: true
+          name: ${{ needs.build.outputs.artifact-name }}
           path: ${{ env.WHEEL_DIR_REL }}
-          run-id: ${{ needs.wait-build.outputs.run-id }}
-          github-token: ${{ github.token }}
 
       - name: 重试前清场 (1)
         if: steps.download-wheel.outcome == 'failure'
@@ -1201,11 +988,8 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          pattern: ppu-wheel-*
-          merge-multiple: true
+          name: ${{ needs.build.outputs.artifact-name }}
           path: ${{ env.WHEEL_DIR_REL }}
-          run-id: ${{ needs.wait-build.outputs.run-id }}
-          github-token: ${{ github.token }}
 
       - name: 重试前清场 (2)
         if: steps.download-wheel.outcome == 'failure' && steps.download-wheel-retry-1.outcome == 'failure'
@@ -1219,16 +1003,13 @@ jobs:
         if: steps.download-wheel.outcome == 'failure' && steps.download-wheel-retry-1.outcome == 'failure'
         uses: actions/download-artifact@v4
         with:
-          pattern: ppu-wheel-*
-          merge-multiple: true
+          name: ${{ needs.build.outputs.artifact-name }}
           path: ${{ env.WHEEL_DIR_REL }}
-          run-id: ${{ needs.wait-build.outputs.run-id }}
-          github-token: ${{ github.token }}
 
       - name: 校验 whl 已就位
         env:
           WHEEL_DIR: ${{ env.WHEEL_DIR_REL }}
-          BUILD_RUN_URL: ${{ needs.wait-build.outputs.run-url }}
+          BUILD_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           UT_CONFIG: slow
           SHARD_LABEL: "1/3"
         run: |
@@ -1280,7 +1061,7 @@ jobs:
 
   ut-slow-2:
     name: "ppu-full-ut slow 2/3 (890P 单卡)"
-    needs: wait-build
+    needs: build
     runs-on: k8s-runner-group-cpu-flytiger
     container:
       image: ghcr.io/actions/actions-runner:latest
@@ -1325,11 +1106,8 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          pattern: ppu-wheel-*
-          merge-multiple: true
+          name: ${{ needs.build.outputs.artifact-name }}
           path: ${{ env.WHEEL_DIR_REL }}
-          run-id: ${{ needs.wait-build.outputs.run-id }}
-          github-token: ${{ github.token }}
 
       - name: 重试前清场 (1)
         if: steps.download-wheel.outcome == 'failure'
@@ -1345,11 +1123,8 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          pattern: ppu-wheel-*
-          merge-multiple: true
+          name: ${{ needs.build.outputs.artifact-name }}
           path: ${{ env.WHEEL_DIR_REL }}
-          run-id: ${{ needs.wait-build.outputs.run-id }}
-          github-token: ${{ github.token }}
 
       - name: 重试前清场 (2)
         if: steps.download-wheel.outcome == 'failure' && steps.download-wheel-retry-1.outcome == 'failure'
@@ -1363,16 +1138,13 @@ jobs:
         if: steps.download-wheel.outcome == 'failure' && steps.download-wheel-retry-1.outcome == 'failure'
         uses: actions/download-artifact@v4
         with:
-          pattern: ppu-wheel-*
-          merge-multiple: true
+          name: ${{ needs.build.outputs.artifact-name }}
           path: ${{ env.WHEEL_DIR_REL }}
-          run-id: ${{ needs.wait-build.outputs.run-id }}
-          github-token: ${{ github.token }}
 
       - name: 校验 whl 已就位
         env:
           WHEEL_DIR: ${{ env.WHEEL_DIR_REL }}
-          BUILD_RUN_URL: ${{ needs.wait-build.outputs.run-url }}
+          BUILD_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           UT_CONFIG: slow
           SHARD_LABEL: "2/3"
         run: |
@@ -1424,7 +1196,7 @@ jobs:
 
   ut-slow-3:
     name: "ppu-full-ut slow 3/3 (890P 单卡)"
-    needs: wait-build
+    needs: build
     runs-on: k8s-runner-group-cpu-flytiger
     container:
       image: ghcr.io/actions/actions-runner:latest
@@ -1469,11 +1241,8 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          pattern: ppu-wheel-*
-          merge-multiple: true
+          name: ${{ needs.build.outputs.artifact-name }}
           path: ${{ env.WHEEL_DIR_REL }}
-          run-id: ${{ needs.wait-build.outputs.run-id }}
-          github-token: ${{ github.token }}
 
       - name: 重试前清场 (1)
         if: steps.download-wheel.outcome == 'failure'
@@ -1489,11 +1258,8 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          pattern: ppu-wheel-*
-          merge-multiple: true
+          name: ${{ needs.build.outputs.artifact-name }}
           path: ${{ env.WHEEL_DIR_REL }}
-          run-id: ${{ needs.wait-build.outputs.run-id }}
-          github-token: ${{ github.token }}
 
       - name: 重试前清场 (2)
         if: steps.download-wheel.outcome == 'failure' && steps.download-wheel-retry-1.outcome == 'failure'
@@ -1507,16 +1273,13 @@ jobs:
         if: steps.download-wheel.outcome == 'failure' && steps.download-wheel-retry-1.outcome == 'failure'
         uses: actions/download-artifact@v4
         with:
-          pattern: ppu-wheel-*
-          merge-multiple: true
+          name: ${{ needs.build.outputs.artifact-name }}
           path: ${{ env.WHEEL_DIR_REL }}
-          run-id: ${{ needs.wait-build.outputs.run-id }}
-          github-token: ${{ github.token }}
 
       - name: 校验 whl 已就位
         env:
           WHEEL_DIR: ${{ env.WHEEL_DIR_REL }}
-          BUILD_RUN_URL: ${{ needs.wait-build.outputs.run-url }}
+          BUILD_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           UT_CONFIG: slow
           SHARD_LABEL: "3/3"
         run: |
