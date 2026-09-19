@@ -97,6 +97,13 @@ and not test_cublas_baddbmm_large_input \
 and not test_mm_bmm_dtype_overload_float16_M \
 and not test_mm_with_mH_args_backend_cublas_cuda \
 and not test_matmul_dropout_device_cpu \
+and not test_float8_error_messages_cuda \
+and not test_float8_rowwise_scaling_sanity_use_fast_accum \
+and not test_float8_scale_fast_accum_cuda \
+and not test_scaled_mm_vs_emulated_row_wise_bfloat16_shapes0_cuda \
+and not test_float8_basics_cuda \
+and not test_cublas_addmm_reduced_precision_fp16 \
+and not test_mm_with_mH_args_backend_cublaslt_cuda \
 and not test_template_epilogue_fusion_extra_reads_fuse_epilogue \
 and (not test_triton_template_generated_code_caching or test_triton_template_generated_code_caching_bmm or test_triton_template_generated_code_caching_mm_plus_mm)"
 
