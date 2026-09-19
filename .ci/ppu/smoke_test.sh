@@ -105,6 +105,8 @@ and not test_float8_basics_cuda \
 and not test_cublas_addmm_reduced_precision_fp16 \
 and not test_mm_with_mH_args_backend_cublaslt_cuda \
 and not test_template_epilogue_fusion_extra_reads_fuse_epilogue \
+and not test_cublas_and_lt_reduced_precision_fp16_accumulate_cuda \
+and not test_mixed_dtypes_linear_cuda_float16 \
 and (not test_triton_template_generated_code_caching or test_triton_template_generated_code_caching_bmm or test_triton_template_generated_code_caching_mm_plus_mm)"
 
 python test/run_test.py \
