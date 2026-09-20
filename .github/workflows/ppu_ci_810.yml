@@ -50,6 +50,7 @@ jobs:
     timeout-minutes: 120
 
     steps:
+      - name: Checkout PyTorch
         id: checkout
         continue-on-error: true
         uses: actions/checkout@v4
