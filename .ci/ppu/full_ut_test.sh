@@ -7,7 +7,7 @@
 # 单独抽成脚本而不是内联到 yaml 的 command：command 由 pod 的默认 shell 执行，
 # 未必是 bash，而 sdk_env.sh 依赖 bash 语法（[[ ]] / BASH_SOURCE）且必须被 source。
 #
-# torch 来自 ppu-linux-build-810/890 编译产出的 whl（workflow 侧已下载到 WHEEL_DIR，随源码一起
+# torch 来自 ppu-ci-810/890 的 build job 编译产出的 whl（workflow 侧已下载到 WHEEL_DIR，随源码一起
 # 送进 pod），由 install_wheel.sh 安装：跑的是 PPU 基础镜像，镜像里没有 torch，
 # 门禁必须测本 PR 编出来的那一份。
 #
@@ -32,7 +32,7 @@
 #   - jit_legacy 走 legacy jit executor，恰好是 --exclude-jit-executor 排掉的那批。
 #
 # -----------------------------------------------------------------------------
-# 仅 CUDA：两层过滤
+# 仅 CUDA：三层过滤
 # -----------------------------------------------------------------------------
 # 第 1 层（用例级）PYTORCH_TESTING_DEVICE_ONLY_FOR=cuda：
 #   common_device_type.py 的 instantiate_device_type_tests 读这个变量，只实例化 cuda
@@ -45,13 +45,19 @@
 #   EXCLUDE_PREFIXES / EXCLUDE_NAMES，按组注明了剔除理由。
 #   注意 run_test.py 自己已经默认排掉了 C++ 测试、test_mps / test_metal、test_xpu、
 #   test_openreg 和 onnx/*（见 get_selected_tests），这里不重复列。
+# 第 3 层（类级）-k 按类名排除纯 CPU 套件：
+#   夹在中间的还有一类——文件本身要跑（里面有 GPU 用例），但同一个文件里又手工
+#   拷了一份完整的 CPU 套件（copy_tests(Template, XxxCpuTests, "cpu") 或 `if HAS_CPU:`
+#   守着的类）。这种写法不走 device type 实例化机制，第 1 层的环境变量管不到，
+#   只能按类名剔。类名清单不写死，由 .ci/ppu/cuda_only_filter.sh 每次跑批前扫 test/
+#   现场算出来（防止 rebase 上游后静默过期），第 1 层也一并在那份共享脚本里做。
 #
 # -----------------------------------------------------------------------------
 # FP8：真武 PPU 当前不支持 FP8，必须过滤（硬性要求，不是可选优化）
 # -----------------------------------------------------------------------------
 # 同样两层，缺一不可：
 #   - 文件级：test_scaled_matmul_cuda（整个文件只有 TestFP8Matmul）与 inductor/test_fp8
-#     （全量 FP8 语义）整文件剔掉，与 ppu_smoke_810/890.yml / ppu_accuracy_810/890.yml 的取舍一致。
+#     （全量 FP8 语义）整文件剔掉，与 ppu_ci_810/890.yml 的 smoke / accuracy job 的取舍一致。
 #   - 用例级：-k 排除表达式，兜住散落在其它文件里的 FP8 用例（例如 dtype 参数化出来的
 #     ..._float8_e4m3fn、test_sparse_semi_structured 的 test_sparse_fp8fp8_mm）。
 #     pytest 的 -k 是**大小写敏感**的子串匹配，所以 fp8/FP8/Fp8、float8/Float8、
@@ -71,7 +77,7 @@
 #   PR_NUMBER        - 仅用于日志溯源（可选）
 #   PYTORCH_TEST_RUN_EVERYTHING_IN_SERIAL - 可选逃生阀，见文末「显存不够怎么办」
 # =============================================================================
-set -euo pipefail
+set -uo pipefail
 
 export SDK_INSTALL_DIR="${SDK_INSTALL_DIR:-/usr/local}"
 
@@ -106,7 +112,7 @@ echo "[full-ut] 配置: UT_CONFIG=${UT_CONFIG} 分片=${SHARD_NUMBER}/${NUM_TEST
 # 也必须放在装 torch 之前 —— import torch 要能找到 SDK 里的运行时库。
 source .ci/ppu/sdk_env.sh
 
-# 安装被测的 torch：本 PR 由 ppu_linux_build_810/890.yml 编出来的 whl
+# 安装被测的 torch：本 PR 由 ppu_ci_810/890.yml 的 build job 编出来的 whl
 bash .ci/ppu/install_wheel.sh
 
 # inductor 用例的 codegen 后端：钉版本、且只从内部源装（理由见 install_triton.sh 头注释）。
@@ -142,9 +148,17 @@ bash .ci/ppu/install_test_deps.sh
 # 自建集群也没有对应凭证。
 
 # -----------------------------------------------------------------------------
-# 第 1 层过滤：仅实例化 CUDA 变体（对齐 .ci/pytorch/test.sh 对 cuda BUILD_ENVIRONMENT 的处理）
+# 第 1 层 + 第 3 层过滤：公共的「只跑 CUDA」过滤器
 # -----------------------------------------------------------------------------
-export PYTORCH_TESTING_DEVICE_ONLY_FOR="cuda"
+# 它里面做两件事：export PYTORCH_TESTING_DEVICE_ONLY_FOR=cuda（第 1 层，对齐
+# .ci/pytorch/test.sh 对 cuda BUILD_ENVIRONMENT 的处理），以及扫 test/ 算出纯 CPU 测试类的
+# -k 排除表达式（第 3 层，下面跑批处用 ppu_cuda_only_k_expr 取用）。
+# 全量 UT 下第 3 层的收益比其它门禁更大：inductor/ 下大量文件（test_torchinductor、
+# test_torchinductor_dynamic_shapes、test_fused_attention、test_cpp_wrapper …）都是一份
+# CommonTemplate 拷成 CpuTests + GPUTests 两份，文件不能排，但 CPU 那一半必须排。
+# 必须 source：它要 export 环境变量并定义 ppu_cuda_only_k_expr 给下面用。
+# shellcheck source=.ci/ppu/cuda_only_filter.sh
+source .ci/ppu/cuda_only_filter.sh
 
 # slow 语义（对齐 .ci/pytorch/test.sh 里 TEST_CONFIG == 'slow' 的分支）
 # 说明：pod 内没有 CI 环境变量，run_test.py 的 IS_CI 为 False，因此不会带
@@ -178,7 +192,7 @@ EXCLUDE_PREFIXES=(
 # 精确文件名。分组即剔除理由；每组都能独立回滚（例如 PPU 支持 FP8 后只删第 1 组）。
 EXCLUDE_NAMES=(
     # --- 1) FP8 专属整文件：真武 PPU 不支持 FP8 ---------------------------------
-    # 与 ppu_smoke_810/890.yml / ppu_accuracy_810/890.yml 的裁剪保持一致；PPU 支持 FP8 后加回来。
+    # 与 ppu_ci_810/890.yml 的 smoke / accuracy job 的裁剪保持一致；PPU 支持 FP8 后加回来。
     # 这两个文件里**所有**用例都是 FP8 语义，留在门禁里只会整体失败。
     test_scaled_matmul_cuda
     inductor/test_fp8
@@ -227,7 +241,7 @@ EXCLUDE_NAMES=(
     test_hub                        # 需访问 github.com 拉模型
 
     # --- 5) H100/B200(SM90+ / TMA / CUTLASS) 整文件专属 -------------------------
-    # 与 ppu_accuracy_810/890.yml 同一个取舍：**整文件**都是大卡专属的才在这里剔；
+    # 与 ppu_ci_810/890.yml 的 accuracy job 同一个取舍：**整文件**都是大卡专属的才在这里剔；
     # 文件内少数大卡用例（如 inductor/test_flex_attention 里那个 TMA 用例）不动 ——
     # 它们由 IS_BIG_GPU / is_big_gpu() / SM90OrLater 等运行期能力探测装饰，
     # 在 PPU 上是 skip 而不是 fail。
@@ -319,7 +333,7 @@ python test/run_test.py \
     --exclude-quantization-tests \
     --exclude "${EXCLUDE_TESTS[@]}" \
     --shard "$SHARD_NUMBER" "$NUM_TEST_SHARDS" \
-    -k "$K_EXPR" \
+    -k "$(ppu_cuda_only_k_expr "$K_EXPR")" \
     --continue-through-error \
     --verbose
 

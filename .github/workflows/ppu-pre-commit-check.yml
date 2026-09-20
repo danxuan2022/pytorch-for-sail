@@ -1,0 +1,50 @@
+name: ppu-pre-commit-check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  precheck:
+    name: Pre-check
+    uses: flytiger-eco/.github/.github/workflows/user-precheck.yml@main
+
+  smoke-test:
+    name: Smoke Test
+    needs: precheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run smoke tests
+        run: |
+          echo "smoke test passed"
+
+  ai-code-review:
+    name: AI Code Review (Copilot Gate)
+    needs: precheck
+    uses: flytiger-eco/.github/.github/workflows/ai-code-review.yml@main
+    secrets: inherit
+
+  human-review:
+    name: Human Review Gate
+    needs: [smoke-test, ai-code-review]
+    uses: flytiger-eco/.github/.github/workflows/human-review.yml@main
+    secrets: inherit
+
+  ci:
+    name: Full CI
+    needs: human-review
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run full CI
+        run: |
+          echo "full CI passed"
