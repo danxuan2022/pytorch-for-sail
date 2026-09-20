@@ -1,21 +1,3 @@
-# =============================================================================
-# PPU BC Lint 门禁：对 PR 做 API 向后兼容（backward-compatibility）检查。
-#
-# 直接复用上游 test-infra 的 bc-lint action（与 .github/workflows/lint-bc.yml 同一份），
-# 只把「运行环境 / 触发条件」改成本 fork 的约定，检查逻辑本身不改。
-#
-# 与上游 lint-bc.yml 的差异（改的都是环境，不是 BC 规则）：
-#   1) 去掉 `if: github.repository_owner == 'pytorch'`：本 fork 不在 pytorch 组织下，
-#      保留该门禁会让整个 job 被跳过（永远不跑）。
-#   2) pull_request 只挂在 fork 的集成分支 v2.11.0-for-ci 上（对齐 ppu_ci_810/890.yml），
-#      不再监听上游那条 `push: tags: ciflow/inductor-cu126/*`（本 fork 没有该 ciflow）。
-#
-# runner 与上游一致用 GitHub 托管的 ubuntu-latest：bc-lint 只需 git + python，不依赖 PPU
-#   硬件，也不需要自建集群的内网依赖，直接跑在托管 runner 上最简单。
-#
-# 不加 paths 过滤：BC 检查针对任意 API 变更（含 .pyi / 存根），按文件目录裁剪可能漏检，
-#   与上游保持一致——任意 PR 都跑。
-# =============================================================================
 name: ppu-lint-bc
 
 on:
@@ -26,6 +8,7 @@ on:
       - reopened
     branches:
       - v2.11.0-for-ci
+      - v2.11.0
   workflow_dispatch:
 
 concurrency:

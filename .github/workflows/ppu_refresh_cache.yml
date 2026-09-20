@@ -1,113 +1,37 @@
-# =============================================================================
-# PPU 编译缓存刷新流水线：手动 / push 触发，为目标分支种 810 / 890 两份 ccache 基线。
-#
-# 用途：
-#   在目标分支上跑完整编译，把两种板型（arch 8.0 / 8.9）的 ccache 基线各种一份进
-#   GitHub Actions Cache，之后该分支上的 PR 编译流水线
-#   （ppu_ci_810.yml / ppu_ci_890.yml）restore 这份基线做增量编译。
-#   本流水线不产出对外的 whl（upload-wheel=false），它的产出就是缓存本身。
-#
-# 为什么共享基线只能由本流水线写（全仓库只此一处回写）：
-#   GitHub 缓存的隔离在**作用域（scope）**，由「创建条目的 ref」决定，与 key 叫什么无关：
-#     - 一次 run 只能 restore 到「自己的 ref + base 分支 + 默认分支」这三个作用域的条目；
-#     - pull_request 的 run 写出的条目落在 refs/pull/<N>/merge，其它 PR 一条都读不到 ——
-#       就算把 key 取得再「公共」也没用（前缀里本来就不带 PR 标识，问题不在 key 层）。
-#   能写进「PR 都读得到」作用域的，只有跑在分支上的 run：push / workflow_dispatch ——
-#   也就是本流水线的两种触发方式（PR 能读到自己 base 分支的作用域）。
-#   （可自证的观察点：_ppu_build.yml 里 Report repo cache usage 跑的 gh cache list 是仓库级的，
-#    能列出所有条目并带 REF 列。能列出 ≠ 能 restore。）
-#
-# 与 PR 流水线的分工：
-#   - 本流水线：唯一的写入方，save-ccache=true + prune-old-ccache=true，维护「每分支 ×
-#     每板型恰好一份」基线。
-#   - PR 流水线（ppu_ci_810/890.yml 的 build job）：只读，一律不回写。
-#   → 所以本流水线停了不会立即挂门禁，但基线一旧，所有 PR 的每次编译都变慢；
-#     基线被淘汰或从未种过时，每条 PR 的每个 commit 都是 4~5h 冷编译。
-#     另：GitHub 会自动删除 7 天未被访问的条目，而 PR 流水线的 restore 也算一次访问 ——
-#     所以分支上持续有 PR 在编译时基线会自动续期；若连续 7 天没人编译，基线会被回收，
-#     需要手动重跑本流水线重种。
-#
-# 触发方式：
-#   1. workflow_dispatch：Actions → ppu-refresh-cache → Run workflow
-#      （急用 / 想重建干净基线 / 基线被回收后重种），在 UI 上选 v2.11.0-for-ci 分支运行
-#   2. push：编译实现或 .ci/ppu 脚本合入 v2.11.0-for-ci 时立即重种
-#
-# 为什么没有 schedule（定时）：
-#   GitHub 的定时事件只在**默认分支**上触发（当前默认分支是 v2.10.0），本文件所服务的
-#   v2.11.0-for-ci 上的 cron 压根不会被唤起；而把定时挂在默认分支上，run 的 ref_name
-#   就是 v2.10.0，cache key 前缀里带的是分支名，种出的基线是 ...-v2.10.0-...，
-#   与 PR-into-v2.11.0-for-ci 算出的 ...-v2.11.0-for-ci-... 一条都对不上（要靠显式
-#   覆盖分支名才能绕开），一旦漏配就是每晚白烧两个 5 小时的 runner。
-#   → 因此只保留 push + 手动触发：两者都天然跑在目标分支上，编的源码、写进 cache key
-#     的分支名、缓存条目落的作用域三者自动一致，不需要任何覆盖。
-#
-# 为什么这里没有「镜像 / 目标架构」的 input：
-#   这两项进 cache key 指纹，只在本流水线改会种出一份 PR 流水线根本读不到的缓存
-#   （指纹不同→前缀不同）。因此镜像的唯一定义在 _ppu_build.yml 的 input 默认值上，
-#   「board → 架构」的映射也只在那里，改它们请改那一处，所有流水线才会一起动。
-#
-# 分支 / 板型隔离：
-#   cache key 前缀 = ppu-ccache-<build-env>-<board>-<分支名>-<镜像+架构指纹>-
-#   810 与 890、v2.11.0-for-ci 与 v2.10.0 因此落在互不相同的前缀上，互不覆盖、互不命中。
-#
-# 10GiB 配额换算（GitHub 单仓库缓存总配额）：
-#   稳态 = 2 个板型 × ccache-maxsize(4G) = 8G，留 2G 余量。因为 PR 侧不回写，条目数
-#   恒为「分支数 × 板型数」，不会被 PR 活动抬高。
-#   prune-old-ccache=true 会在回写前删掉同前缀旧条目，保证「每个板型每分支只留一份」，
-#   否则历史条目累积后 GitHub 按 LRU 淘汰，很容易把另一份基线挤掉。
-#   → 如果以后再加板型 / 再加分支，必须同步下调 ccache-maxsize。
-#
-# 何时需要手动重跑：
-#   - 目标分支刚合入较大改动，PR 编译的命中率掉下来（看 build 的 job summary 里的命中率）
-#   - 分支闲置超过 7 天，基线被 GitHub 回收
-#   - 换编译镜像 / 改 board→架构映射（指纹变了，旧条目自动失效）
-#   - 缓存被污染或想重建干净基线：勾上 ignore-ccache
-#
-# 前置要求：workflow_dispatch 的入口只在**默认分支**上有这份文件时才会出现（当前默认分支
-#   是 v2.10.0）；入口出现后在 UI 上选哪个分支运行，用的就是那个分支上的文件。
-#   所以想要手动触发入口，本文件（连同 _ppu_build.yml 与 .ci/ppu/）需要同时合入 v2.10.0；
-#   push 触发不受此限制。
-# =============================================================================
 name: ppu-refresh-cache
 
 on:
   workflow_dispatch:
     inputs:
       target-branch:
-        description: 要种缓存的分支（须与 PR 的 base 分支同名，否则前缀对不上）
+        description: Branch to seed the cache for (must match the PR base branch name, otherwise the prefix will not align)
         type: string
         default: v2.11.0-for-ci
       ccache-maxsize:
-        description: ccache 容量上限（板型数 × 分支数 × 该值须留在 10GiB 配额内）
+        description: ccache size limit (board count × branch count × this value must stay within the 10GiB quota)
         type: string
         default: "4G"
       ignore-ccache:
-        description: 忽略现有缓存做冷编译，重建一份干净基线
+        description: Ignore existing cache and do a cold build to rebuild a clean baseline
         type: boolean
         default: false
       upload-wheel:
-        description: 顺带上传 whl artifact（本流水线的主产出是缓存，默认不上传）
+        description: Also upload the whl artifact (the main output of this pipeline is the cache, not uploaded by default)
         type: boolean
         default: false
   push:
     branches:
       - v2.11.0-for-ci
     paths:
-      # 匹配的是仓库里的真实路径（下划线），不是上面 name: 里的连字符
       - '.github/workflows/ppu_refresh_cache.yml'
-      # 编译实现与脚本也要盯住，否则改它们不会触发重种
       - '.github/workflows/_ppu_build.yml'
       - '.ci/ppu/**'
 
 permissions:
   contents: read
-  # prune-old-ccache 用 gh cache list / delete 清理同前缀旧条目
   actions: write
 
 concurrency:
-  # 同一分支的刷缓存任务串行：两个 run 并发回写会互相覆盖，还会瞬时挤爆配额。
-  # 这里不能 cancel-in-progress —— 编译要跑几个小时，中途取消等于白烧一次 runner。
-  # 810 / 890 是同一个 run 里的两个 matrix job，不受这个 group 影响（它们必须并行）。
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
@@ -115,32 +39,17 @@ jobs:
   refresh:
     name: refresh ccache (${{ matrix.board }})
     strategy:
-      # 一个板型的编译失败（OOM / 网络）不该顺带取消另一个已经编到一半的板型
       fail-fast: false
       matrix:
-        # 只有板型这一个维度：其余参数（镜像 / 架构映射 / 环境标识）都在 _ppu_build.yml 里，
-        # 这里多写一份就等于给「两侧算出不同 cache key 前缀」开了口子
         board: ["810", "890"]
     uses: ./.github/workflows/_ppu_build.yml
     with:
       board: ${{ matrix.board }}
-      # build-environment / docker-image 一律不传，用 _ppu_build.yml 的默认值，
-      # 保证与 PR 流水线算出同一个 cache key 前缀。
-      #
-      # push / workflow_dispatch 本来就跑在目标分支上，传空串即用 _ppu_build.yml 的默认
-      # 行为（当前 ref）。workflow_dispatch 时以 UI 上填的 target-branch 为准，便于在
-      # 一个分支上运行、给另一个分支的 key 种基线。
       source-ref: ${{ inputs.target-branch || '' }}
       cache-branch: ${{ inputs.target-branch || '' }}
-      # push 事件下 inputs 上下文为 null，会渲染成空串；下游 ignore-ccache /
-      # upload-wheel 声明为 boolean，空串过不了类型校验，run 会在启动前就失败。
-      # 另外 upload-wheel 在 _ppu_build.yml 侧默认是 true，兜底值必须显式给 false。
       ccache-maxsize: ${{ inputs.ccache-maxsize || '4G' }}
       ignore-ccache: ${{ inputs.ignore-ccache || false }}
       upload-wheel: ${{ inputs.upload-wheel || false }}
-      # 本流水线存在的意义就是回写缓存，而且全仓库只有这一处写（原因见文件头）
       save-ccache: true
-      # 回写前清掉本分支 + 本板型的历史条目，保证「每个板型每分支只留一份」
       prune-old-ccache: true
-      # 冷编译比 PR 增量编译慢得多，超时给足
       timeout-minutes: 400

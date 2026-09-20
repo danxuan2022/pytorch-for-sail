@@ -1,37 +1,9 @@
-# =============================================================================
-# PPU CI 门禁（890P 板型 / arch 8.9）：单 Workflow 多 Job。
-#
-# 结构：一个 build job（编 whl）+ smoke / accuracy / perf / distribute 四个测试 job，
-# 后四者 `needs: build`，在同一个 run 内并行执行，直接按名下载 build 上传的 whl artifact
-# —— 不再各自起一条 workflow 去轮询 build 的 run 状态（旧的 ppu_smoke_890.yml 等）。
-# 收益：省掉每条门禁几小时的 github-script 轮询与跨 run 下载（run-id + token）。
-#
-# 与 ppu_ci_810.yml 的唯一区别：board(890→8.9) / NODE_SELECTOR(ZW-M890P) / 名称里的板型字样。
-# 其余逐字相同，改一侧必须同步另一侧（diff 两个文件即可确认没漂移）。
-#
-# full_ut 不在这里：它是手动触发（workflow_dispatch）、8 分片、数小时的重型门禁，不该挂在
-# 每个 PR 上自动跑，仍是独立的 ppu_full_ut_890.yml，通过复用本 workflow 的 build 产物运行。
-#
-# 触发与 job 开关：
-#   - pull_request（v2.11.0-for-ci，paths 命中编译相关变更）：build + 4 个测试 job 全跑。
-#   - workflow_dispatch：只跑 build（测试 job 被 `if: github.event_name == 'pull_request'`
-#     跳过），等价旧 ppu_linux_build_890.yml 的「临时出包」，也给 full_ut 提供可复用的 whl，
-#     且不会误触发 4 条占用 PPU 卡的测试。
-#
-# 编译逻辑不在本文件：镜像、PPU SDK、ccache、并行度 / OOM 防护、产物收集等全部在
-# 可复用 workflow .github/workflows/_ppu_build.yml 里（与 890、刷缓存流水线共用），
-# 保证几条流水线算出的 cache key 前缀与编译参数完全一致。board→架构、artifact 命名也在那里。
-# 本 workflow 只读缓存不回写（回写交给 ppu_refresh_cache.yml，原因见该文件头）。
-# =============================================================================
 name: ppu-ci-890
 
 on:
   pull_request:
     branches:
       - v2.11.0-for-ci
-    # 只有可能影响编译产物 / 测试的变更才触发：纯文档 / 无关脚本的 PR 不空跑一次编译+测试。
-    # 覆盖 C++/CUDA/Python 源码、编译脚本，以及本文件与它调用的可复用 workflow
-    # （改这两者本身也要能触发验证）。测试 job 与 build 同 run，不再需要各列一份测试文件名。
     paths:
       - 'aten/**'
       - 'torch/**'
@@ -41,8 +13,7 @@ on:
       - '.ci/ppu/**'
       - '.github/workflows/ppu_ci_890.yml'
       - '.github/workflows/_ppu_build.yml'
-  # 手动触发只出包（测试 job 会被下面的 if 跳过）。topic 分支上读不到 v2.11.0-for-ci 的缓存
-  # （兄弟分支作用域不可见），必然冷编译；本 workflow 不回写，下次手动跑还是冷的。
+
   workflow_dispatch:
 
 concurrency:
@@ -51,85 +22,41 @@ concurrency:
 
 permissions:
   contents: read
-  # 同一个 run 内用 actions/download-artifact@v4 按名取 build 上传的 whl 也需要 actions: read
-  # —— v4 走 Actions Artifact API，缺这个 scope 会 403（顶层 permissions 一旦写死就只剩所列项）。
   actions: read
 
 env:
-  # PPU 基础镜像：python3.12 + CUDA13 + PPU SDK + triton，不含 torch —— torch 由本 run 的
-  # build job 编出的 whl 提供。刻意与 _ppu_build.yml 的 docker-image 默认值用同一个 tag：
-  # 编译与运行同镜像，才不会出现 whl 与镜像里 SDK / 工具链对不上的问题。
-  # 注意：测试 job 的 runner container 用的是 actions-runner 镜像（见各 job 的 container），
-  # 本 IMAGE 只在 PPU pod 内用；换 tag 或换板型都要重新确认已预拉到 NODE_SELECTOR 指定节点。
   IMAGE: pkg.flytiger-eco.com/docker_release/ppu:v2.1.1-cuda13.0-ubuntu24-py312
   NAMESPACE: ppu-sched
   HOST_VOLUMES: "/nas_aisw:/nas_aisw,/wl_nas:/mnt/wl_nas"
-  # action 在 pod 内解压源码的路径（也是 action 的默认值，这里显式写出便于 command 引用）
   SOURCE_DIR: /workspace/source
-  # 本文件是 890P 那一套：被测的是 build job 编出的 arch 8.9 whl，必须钉在 890P 上。
-  # 容量上 890P 宽松：集群里 890P 有 16 台（每台 8 PPU），810E 只有 1 台（16 PPU）。所以
-  # 890 门禁不像 810 那样全挤在同一台机器上排队，pod pending 时间通常较短；与 ppu-full-ut-890
-  # 的资源竞争也小得多。
   NODE_SELECTOR: "board-type=ZW-M890P"
-  # 内部 pip 源：pod 内只能访问内网，补装 run_test.py 必需的 pytest 插件要走这个源。
-  # 仓库名是 pypi_index（带下划线的 VIRTUAL 仓，聚合 pypi_formal/aliyun/huawei/tsinghua 等代理）。
   PIP_INDEX: https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple
-  # inductor 的 codegen 后端 triton：钉版本，且只从上面那个内部仓装（smoke 不用，其余三条用）。
-  # accuracy / perf / distribute 共用同一个版本号，改这里即可。
   TRITON_VERSION: "3.6.0"
-  # whl 落地目录（相对源码根）。必须在源码树内，且不能被 .gitignore 命中：
-  # 它要靠 ppu-distributed-action 打包源码一起送进 pod，而 dist/ 在 .gitignore 里，
-  # 按 gitignore 过滤的打包方式会把它整个丢掉。
   WHEEL_DIR_REL: .ci/ppu/wheelhouse
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # 编 whl（复用 workflow）。board 是本文件与 810 的唯一差异：它同时决定 arch(8.9) 与
-  # cache key / artifact 名里的板型后缀。镜像 / 环境标识前缀一律用 _ppu_build.yml 的默认值，
-  # 保证与 ppu_refresh_cache.yml 的 890 分支算出同一个 cache key 前缀。
-  # 不传 save-ccache：默认 false，本 workflow 只读缓存不回写（原因见文件头）。
-  # 产物：artifact ppu-wheel-<env>-890-<commit>，名由 outputs.artifact-name 透出给下面的测试 job。
-  # ---------------------------------------------------------------------------
   build:
     uses: ./.github/workflows/_ppu_build.yml
     with:
       board: "890"
       upload-wheel: true
 
-  # ---------------------------------------------------------------------------
-  # P0 smoke：单卡 CUDA 冒烟测试。以下 checkout / 下载 whl / 校验三段在 smoke / accuracy /
-  # perf / distribute 四个 job 里逐字相同，改一处必须同步另三处（diff 即可确认没漂移）。
-  # ---------------------------------------------------------------------------
   smoke:
     name: ppu-smoke (890P 单卡)
     needs: build
-    # 手动 dispatch 只出包，不跑测试（见文件头）
     if: ${{ github.event_name == 'pull_request' }}
     runs-on: k8s-runner-group-cpu-flytiger
     container:
       image: ghcr.io/actions/actions-runner:latest
-    # 不再叠加「等 build」的时间（needs: build 已保证 build 先完成）：= 用例超时(60) + checkout /
-    # 下载 whl / pod 启动与打包余量(60)。注：6 小时上限只约束 GitHub 托管 runner，本 job 在自建
-    # ARC runner 上不受该限制。
     timeout-minutes: 120
 
     steps:
-      # -----------------------------------------------------------------------
-      # checkout 三次尝试：本 job 跑在自建 ARC runner 上、出网走代理，git clone 与 artifact
-      # 下载撞的是同一类网络故障（tunneling socket could not be established / getaddrinfo
-      # ENOTFOUND <proxy> / "RPC failed; curl transfer closed"）。一次抖动就把门禁判红、要人
-      # 手动重跑是不可接受的。GHA 的 step 没有 retry 键，重试一个 uses 步骤只能再写一个 step。
-      # 不需要手动清场（与 whl 不同）：checkout 发现 .git 无效或 remote 对不上会自己清空重 clone。
-      # 三段的 with: 必须逐字一致，否则重试会签出与第一次不同的东西。
-      # -----------------------------------------------------------------------
       - name: Checkout PyTorch
         id: checkout
         continue-on-error: true
         uses: actions/checkout@v4
         with:
-          # 签出 PR head commit（github.sha 在 PR 场景是 merge commit），保证测试代码与 PR 一致
           ref: ${{ github.event.pull_request.head.sha }}
-          # 只跑 python 测试，不需要 third_party 子模块；浅克隆加速，也减小传到 NAS 的包体积
           fetch-depth: 1
 
       - name: 重试前等待 (checkout 1)
@@ -156,13 +83,6 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 1
 
-      # -----------------------------------------------------------------------
-      # 下载本 run 的 build job 上传的 whl → 校验。与旧的独立 workflow 不同：build 就在同一个
-      # run 里，不必轮询、也不必给 run-id + token —— 按 needs.build 透出的 artifact 名直接取。
-      # 仍写三次重试：download-artifact 没有 retries 输入，而这一步要拉一个几百 MB 的 zip，
-      # 自建 runner 出网走代理，偶发 "tunneling socket could not be established /
-      # getaddrinfo ENOTFOUND <proxy>"。前两次 continue-on-error 串成「失败才重试」，最后一次不兜。
-      # -----------------------------------------------------------------------
       - name: 下载 whl artifact
         id: download-wheel
         continue-on-error: true
@@ -207,14 +127,9 @@ jobs:
 
       - name: 校验 whl 已就位
         env:
-          # 用相对路径：${{ github.workspace }} 求值出的是 runner 自己的路径
-          # (/home/runner/_work/...)，而本步骤跑在 container 里看到的是挂载点 (/__w/...)
           WHEEL_DIR: ${{ env.WHEEL_DIR_REL }}
           BUILD_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          # 卡在这里，而不是等 pod 起来才发现没包 —— 那时已经占着 PPU 卡了
-          # 本步骤在 actions-runner 容器里跑，容器无 bash，默认 shell 会回退到 sh：
-          # 不能用 shopt / 数组 / [[ ]] 等 bash 专有语法，一律改成 POSIX sh 写法。
           count=0
           wheel=""
           for f in "${WHEEL_DIR}"/torch-*.whl; do
@@ -248,9 +163,6 @@ jobs:
           namespace: ${{ env.NAMESPACE }}
           source_dir: ${{ env.SOURCE_DIR }}
           timeout_minutes: 60
-          # 环境变量必须在 command 里注入：job 级 env 不会传进 PPU pod。
-          # 脚本自身会 cd 到源码根目录，所以这里只给绝对路径即可。
-          # WHEEL_DIR 指向上面下载的 whl（已随源码被 action 打包到 pod 的 source_dir 下）。
           command: |
             PR_NUMBER="${{ github.event.pull_request.number }}" \
             WHEEL_DIR="${{ env.SOURCE_DIR }}/${{ env.WHEEL_DIR_REL }}" \
@@ -258,144 +170,6 @@ jobs:
             PIP_INDEX="${{ env.PIP_INDEX }}" \
             bash ${{ env.SOURCE_DIR }}/.ci/ppu/smoke_test.sh
 
-  # ---------------------------------------------------------------------------
-  # P1 accuracy：2 卡 CUDA inductor 精度单测（脚本内 --shard 分片并行）。checkout / 下载 whl / 校验三段同 smoke。
-  # ---------------------------------------------------------------------------
-  accuracy:
-    name: ppu-accuracy-cuda (890P 2 卡分片)
-    needs: build
-    if: ${{ github.event_name == 'pull_request' }}
-    runs-on: k8s-runner-group-cpu-flytiger
-    container:
-      image: ghcr.io/actions/actions-runner:latest
-    # = 用例超时(120) + checkout / 下载 whl / pod 启动与打包余量(60)
-    timeout-minutes: 180
-
-    steps:
-      - name: Checkout PyTorch
-        id: checkout
-        continue-on-error: true
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 1
-
-      - name: 重试前等待 (checkout 1)
-        if: steps.checkout.outcome == 'failure'
-        run: sleep 15
-
-      - name: Checkout PyTorch (重试 1)
-        id: checkout-retry-1
-        if: steps.checkout.outcome == 'failure'
-        continue-on-error: true
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 1
-
-      - name: 重试前等待 (checkout 2)
-        if: steps.checkout.outcome == 'failure' && steps.checkout-retry-1.outcome == 'failure'
-        run: sleep 15
-
-      - name: Checkout PyTorch (重试 2)
-        if: steps.checkout.outcome == 'failure' && steps.checkout-retry-1.outcome == 'failure'
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 1
-
-      - name: 下载 whl artifact
-        id: download-wheel
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.build.outputs.artifact-name }}
-          path: ${{ env.WHEEL_DIR_REL }}
-
-      - name: 重试前清场 (1)
-        if: steps.download-wheel.outcome == 'failure'
-        env:
-          WHEEL_DIR: ${{ env.WHEEL_DIR_REL }}
-        run: |
-          rm -rf "${WHEEL_DIR}"
-          sleep 30
-
-      - name: 下载 whl artifact (重试 1)
-        id: download-wheel-retry-1
-        if: steps.download-wheel.outcome == 'failure'
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.build.outputs.artifact-name }}
-          path: ${{ env.WHEEL_DIR_REL }}
-
-      - name: 重试前清场 (2)
-        if: steps.download-wheel.outcome == 'failure' && steps.download-wheel-retry-1.outcome == 'failure'
-        env:
-          WHEEL_DIR: ${{ env.WHEEL_DIR_REL }}
-        run: |
-          rm -rf "${WHEEL_DIR}"
-          sleep 60
-
-      - name: 下载 whl artifact (重试 2)
-        if: steps.download-wheel.outcome == 'failure' && steps.download-wheel-retry-1.outcome == 'failure'
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.build.outputs.artifact-name }}
-          path: ${{ env.WHEEL_DIR_REL }}
-
-      - name: 校验 whl 已就位
-        env:
-          WHEEL_DIR: ${{ env.WHEEL_DIR_REL }}
-          BUILD_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          count=0
-          wheel=""
-          for f in "${WHEEL_DIR}"/torch-*.whl; do
-            [ -e "$f" ] || continue
-            count=$((count + 1))
-            wheel="$f"
-          done
-          if [ "$count" -ne 1 ]; then
-            echo "::error::期望 ${WHEEL_DIR} 下恰好 1 个 torch-*.whl，实际 ${count} 个"
-            ls -la "${WHEEL_DIR}" 2>/dev/null || echo "（目录不存在）"
-            exit 1
-          fi
-          wheel_name=$(basename "$wheel")
-          echo "[wheel] ${wheel_name} ($(du -h "$wheel" | cut -f1))"
-          {
-            echo "### 被测 whl"
-            echo ""
-            echo "- 包: \`${wheel_name}\`"
-            echo "- 来源: ${BUILD_RUN_URL}"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: "890P 2 卡 (2 PPU) CUDA inductor 精度单测（--shard 分片并行）"
-        uses: flytiger-eco/ppu-distributed-action@main
-        with:
-          nnodes: 0
-          # 2 卡：pod 可见 2 张 PPU（resources 请求 alibabacloud.com/ppu: "2"），accuracy_test.sh
-          # 内起 2 个 --shard 进程分别用 CUDA_VISIBLE_DEVICES 钉到 0/1 号卡并行跑。
-          # command 仍只执行一次（action 不会按卡重复执行）；分片与钉卡逻辑全在脚本里。
-          nproc_per_node: 2
-          node_selector: ${{ env.NODE_SELECTOR }}
-          host_volumes: ${{ env.HOST_VOLUMES }}
-          image: ${{ env.IMAGE }}
-          namespace: ${{ env.NAMESPACE }}
-          source_dir: ${{ env.SOURCE_DIR }}
-          timeout_minutes: 120
-          command: |
-            PR_NUMBER="${{ github.event.pull_request.number }}" \
-            WHEEL_DIR="${{ env.SOURCE_DIR }}/${{ env.WHEEL_DIR_REL }}" \
-            SDK_INSTALL_DIR="/usr/local" \
-            PIP_INDEX="${{ env.PIP_INDEX }}" \
-            TRITON_INDEX="${{ env.PIP_INDEX }}" \
-            TRITON_VERSION="${{ env.TRITON_VERSION }}" \
-            bash ${{ env.SOURCE_DIR }}/.ci/ppu/accuracy_test.sh
-
-  # ---------------------------------------------------------------------------
-  # P2 perf：单卡 CUDA inductor 性能测试。checkout / 下载 whl / 校验三段同 smoke。
-  # ---------------------------------------------------------------------------
   perf:
     name: ppu-perf-cuda (890P 单卡)
     needs: build
@@ -403,7 +177,6 @@ jobs:
     runs-on: k8s-runner-group-cpu-flytiger
     container:
       image: ghcr.io/actions/actions-runner:latest
-    # = 用例超时(150) + checkout / 下载 whl / pod 启动与打包余量(60)
     timeout-minutes: 210
 
     steps:
@@ -515,9 +288,6 @@ jobs:
           image: ${{ env.IMAGE }}
           namespace: ${{ env.NAMESPACE }}
           source_dir: ${{ env.SOURCE_DIR }}
-          # 比 accuracy 的 120 再放宽：perf 用例除了编译，还要真的反复计时
-          # （test_kernel_benchmark 会起子进程 benchmark 生成的 kernel，
-          # gpt_fast 每个实验都带 5 轮 warmup + 4 个输入规模）。
           timeout_minutes: 150
           command: |
             PR_NUMBER="${{ github.event.pull_request.number }}" \
@@ -527,154 +297,3 @@ jobs:
             TRITON_INDEX="${{ env.PIP_INDEX }}" \
             TRITON_VERSION="${{ env.TRITON_VERSION }}" \
             bash ${{ env.SOURCE_DIR }}/.ci/ppu/perf_test.sh
-
-  # ---------------------------------------------------------------------------
-  # P1 distribute：多卡（2 PPU）CUDA 分布式测试。checkout / 下载 whl / 校验三段同 smoke，
-  # 多一步「删掉 .git」（分布式用例不调 git，删掉减小 NAS 暂存体积、并避开 cp 只读文件报错）。
-  # ---------------------------------------------------------------------------
-  distribute:
-    name: ppu-distribute (890P 多卡 2 PPU)
-    needs: build
-    if: ${{ github.event_name == 'pull_request' }}
-    runs-on: k8s-runner-group-cpu-flytiger
-    container:
-      image: ghcr.io/actions/actions-runner:latest
-    # = 用例超时(240) + checkout / 下载 whl / pod 启动与打包余量(60)
-    timeout-minutes: 300
-
-    steps:
-      - name: Checkout PyTorch
-        id: checkout
-        continue-on-error: true
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 1
-
-      - name: 重试前等待 (checkout 1)
-        if: steps.checkout.outcome == 'failure'
-        run: sleep 15
-
-      - name: Checkout PyTorch (重试 1)
-        id: checkout-retry-1
-        if: steps.checkout.outcome == 'failure'
-        continue-on-error: true
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 1
-
-      - name: 重试前等待 (checkout 2)
-        if: steps.checkout.outcome == 'failure' && steps.checkout-retry-1.outcome == 'failure'
-        run: sleep 15
-
-      - name: Checkout PyTorch (重试 2)
-        if: steps.checkout.outcome == 'failure' && steps.checkout-retry-1.outcome == 'failure'
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 1
-
-      - name: 下载 whl artifact
-        id: download-wheel
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.build.outputs.artifact-name }}
-          path: ${{ env.WHEEL_DIR_REL }}
-
-      - name: 重试前清场 (1)
-        if: steps.download-wheel.outcome == 'failure'
-        env:
-          WHEEL_DIR: ${{ env.WHEEL_DIR_REL }}
-        run: |
-          rm -rf "${WHEEL_DIR}"
-          sleep 30
-
-      - name: 下载 whl artifact (重试 1)
-        id: download-wheel-retry-1
-        if: steps.download-wheel.outcome == 'failure'
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.build.outputs.artifact-name }}
-          path: ${{ env.WHEEL_DIR_REL }}
-
-      - name: 重试前清场 (2)
-        if: steps.download-wheel.outcome == 'failure' && steps.download-wheel-retry-1.outcome == 'failure'
-        env:
-          WHEEL_DIR: ${{ env.WHEEL_DIR_REL }}
-        run: |
-          rm -rf "${WHEEL_DIR}"
-          sleep 60
-
-      - name: 下载 whl artifact (重试 2)
-        if: steps.download-wheel.outcome == 'failure' && steps.download-wheel-retry-1.outcome == 'failure'
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.build.outputs.artifact-name }}
-          path: ${{ env.WHEEL_DIR_REL }}
-
-      - name: 校验 whl 已就位
-        env:
-          WHEEL_DIR: ${{ env.WHEEL_DIR_REL }}
-          BUILD_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          count=0
-          wheel=""
-          for f in "${WHEEL_DIR}"/torch-*.whl; do
-            [ -e "$f" ] || continue
-            count=$((count + 1))
-            wheel="$f"
-          done
-          if [ "$count" -ne 1 ]; then
-            echo "::error::期望 ${WHEEL_DIR} 下恰好 1 个 torch-*.whl，实际 ${count} 个"
-            ls -la "${WHEEL_DIR}" 2>/dev/null || echo "（目录不存在）"
-            exit 1
-          fi
-          wheel_name=$(basename "$wheel")
-          echo "[wheel] ${wheel_name} ($(du -h "$wheel" | cut -f1))"
-          {
-            echo "### 被测 whl"
-            echo ""
-            echo "- 包: \`${wheel_name}\`"
-            echo "- 来源: ${BUILD_RUN_URL}"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # -----------------------------------------------------------------------
-      # 下一步 action 会 `cp -a $GITHUB_WORKSPACE/.` 到 NAS 再打包，先把 .git 删掉：
-      #   - 体积：即使 fetch-depth: 1，.git 的 pack 仍占 workspace 的大头，staging 写 NAS(NFS)
-      #     单次就要花几分钟。
-      #   - 正确性：pod 内 run_test.py / 用例 / .ci/ppu/distributed_test.sh 都不调 git，删掉不影响。
-      #   - 兼删了 cp "Permission denied" 的唯一触发源：.git 的 *.pack/*.idx/*.rev 是源码树里
-      #     唯一的只读(0444)文件。
-      # 本步骤在 actions-runner 容器里跑（无 bash，回退 sh），只用 POSIX 写法。
-      # -----------------------------------------------------------------------
-      - name: 删掉 .git（减小 NAS 暂存体积）
-        run: rm -rf .git
-
-      - name: "890P 多卡 (2 PPU) CUDA 分布式测试"
-        uses: flytiger-eco/ppu-distributed-action@main
-        with:
-          # nnodes: 0 → SINGLE_MODE：只起 1 个 worker pod，不建 PodGroup / headless Service。
-          # nproc_per_node: 2 → 该 pod 的 resources 请求 alibabacloud.com/ppu: "2"，
-          # 也就是容器里可见 2 张 PPU；command 仍只执行一次（不是每卡一次）。
-          nnodes: 0
-          nproc_per_node: 2
-          node_selector: ${{ env.NODE_SELECTOR }}
-          host_volumes: ${{ env.HOST_VOLUMES }}
-          image: ${{ env.IMAGE }}
-          namespace: ${{ env.NAMESPACE }}
-          source_dir: ${{ env.SOURCE_DIR }}
-          # 比 smoke 的 60 分钟长得多：分布式用例每条都要 spawn 多进程 + 建 process group，
-          # 且清单里 test_dynamo_distributed / test_inductor_collectives / test_fully_shard_compile
-          # 这几条都带编译，单条就可能几十分钟。
-          timeout_minutes: 240
-          command: |
-            PR_NUMBER="${{ github.event.pull_request.number }}" \
-            WHEEL_DIR="${{ env.SOURCE_DIR }}/${{ env.WHEEL_DIR_REL }}" \
-            SDK_INSTALL_DIR="/usr/local" \
-            PIP_INDEX="${{ env.PIP_INDEX }}" \
-            TRITON_INDEX="${{ env.PIP_INDEX }}" \
-            TRITON_VERSION="${{ env.TRITON_VERSION }}" \
-            bash ${{ env.SOURCE_DIR }}/.ci/ppu/distributed_test.sh

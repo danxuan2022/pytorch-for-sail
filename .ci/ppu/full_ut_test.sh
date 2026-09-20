@@ -77,7 +77,7 @@
 #   PR_NUMBER        - 仅用于日志溯源（可选）
 #   PYTORCH_TEST_RUN_EVERYTHING_IN_SERIAL - 可选逃生阀，见文末「显存不够怎么办」
 # =============================================================================
-set -euo pipefail
+set -uo pipefail
 
 export SDK_INSTALL_DIR="${SDK_INSTALL_DIR:-/usr/local}"
 
