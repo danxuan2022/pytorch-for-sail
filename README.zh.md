@@ -154,6 +154,10 @@ export TORCH_CUDA_ARCH_LIST="8.0"
 # 如需仅编译 SM89，请注释上一行并取消下一行的注释。
 # export TORCH_CUDA_ARCH_LIST="8.9"
 
+# 编译期：elementwise 算子优化默认编译，该优化仅对 8.9 架构有效；如不想编译该优化，请取消下一行的注释。
+# export USE_ELEMENTWISE_OPT=False
+# 运行时：elementwise 算子优化默认关闭，请在运行时设置 PYTORCH_ENABLE_PPU_ELEMENTWISE_OPT=True 开启优化。
+
 # 4. 使用配置的构建后端编译生成 wheel 安装包
 NCCL_INCLUDE_DIR=/usr/local/PPU_SDK/CUDA_SDK/include \
 NCCL_LIB_DIR=/usr/local/PPU_SDK/CUDA_SDK/lib64 \
