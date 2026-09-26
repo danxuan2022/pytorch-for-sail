@@ -1,18 +1,18 @@
 name: ppu-ci-810
 
 on:
-  # pull_request:
-  #   branches:
-  #     - v2.11.0-for-ci
-  #   paths:
-  #     - 'aten/**'
-  #     - 'torch/**'
-  #     - 'c10/**'
-  #     - 'torchgen/**'
-  #     - 'setup.py'
-  #     - '.ci/ppu/**'
-  #     - '.github/workflows/ppu_ci_810.yml'
-  #     - '.github/workflows/_ppu_build.yml'
+  pull_request:
+    branches:
+      - v2.11.0-for-ci
+    paths:
+      - 'aten/**'
+      - 'torch/**'
+      - 'c10/**'
+      - 'torchgen/**'
+      - 'setup.py'
+      - '.ci/ppu/**'
+      - '.github/workflows/ppu_ci_810.yml'
+      - '.github/workflows/_ppu_build.yml'
   workflow_dispatch:
 
 concurrency:
