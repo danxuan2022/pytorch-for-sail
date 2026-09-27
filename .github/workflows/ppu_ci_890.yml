@@ -16,6 +16,15 @@ on:
   push:
     branches:
       - 'v2.*'
+    paths:
+      - 'aten/**'
+      - 'torch/**'
+      - 'c10/**'
+      - 'torchgen/**'
+      - 'setup.py'
+      - '.ci/ppu/**'
+      - '.github/workflows/ppu_ci_890.yml'
+      - '.github/workflows/_ppu_build.yml'
   workflow_dispatch:
 
 
@@ -171,6 +180,8 @@ jobs:
             WHEEL_DIR="${{ env.SOURCE_DIR }}/${{ env.WHEEL_DIR_REL }}" \
             SDK_INSTALL_DIR="/usr/local" \
             PIP_INDEX="${{ env.PIP_INDEX }}" \
+            TRITON_INDEX="${{ env.PIP_INDEX }}" \
+            TRITON_VERSION="${{ env.TRITON_VERSION }}" \
             bash ${{ env.SOURCE_DIR }}/.ci/ppu/smoke_test.sh
 
   perf:

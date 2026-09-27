@@ -2,6 +2,7 @@ name: ppu-full-ut-890
 
 on:
   workflow_dispatch:
+  # 北京时间每周六 06:00（UTC 周五 22:00）触发一次
   schedule:
     - cron: "0 22 * * 5"
 concurrency:

@@ -2,9 +2,9 @@ name: ppu-full-ut-810
 
 on:
   workflow_dispatch:
-  # 北京时间每周六 06:00（UTC 周五 18:00）触发一次
+  # 北京时间每周六 06:00（UTC 周五 22:00）触发一次
   schedule:
-    - cron: "0 22 * * 5" 
+    - cron: "0 22 * * 5"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

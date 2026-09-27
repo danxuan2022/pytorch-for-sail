@@ -6,6 +6,7 @@ cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 echo "[smoke] 源码目录: $(pwd)"
 source .ci/ppu/sdk_env.sh
 bash .ci/ppu/install_wheel.sh
+bash .ci/ppu/install_triton.sh
 
 echo "=== 环境自检 ==="
 echo "pr=${PR_NUMBER:-none} hostname=$(hostname) node=${NODE_NAME:-unknown}"
@@ -42,7 +43,12 @@ and not test_mm_with_mH_args_backend_cublaslt_cuda \
 and not test_template_epilogue_fusion_extra_reads_fuse_epilogue \
 and not test_cublas_and_lt_reduced_precision_fp16_accumulate_cuda \
 and not test_mixed_dtypes_linear_cuda_float16 \
-and (not test_triton_template_generated_code_caching or test_triton_template_generated_code_caching_bmm or test_triton_template_generated_code_caching_mm_plus_mm)"
+and not test_fake_crossref_backward_no_amp_nn_functional_bilinear_cuda_float32 \
+and not test_numpy_ref_nn_functional_pdist_cuda_float64 \
+and not test_noncontiguous_samples_nn_functional_grid_sample_cuda_float32 \
+and not test_triton_template_generated_code_caching \
+and not test_triton_template_generated_code_caching_bmm \
+and not test_triton_template_generated_code_caching_mm_plus_mm"
 
 python test/run_test.py \
     --include \

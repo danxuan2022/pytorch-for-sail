@@ -37,7 +37,7 @@ ppu-smi || echo "[warn] ppu-smi 不可用，请确认 pod 已分配 PPU 设备"
 
 bash .ci/ppu/install_test_deps.sh
 ensure_bench_deps() {
-    local want="${BENCH_PIP_PACKAGES:-numpy==1.26.2 scipy==1.14.1 pandas==2.2.3 tqdm>=4.66.0 transformers==5.17.0 timm}"
+    local want="${BENCH_PIP_PACKAGES:-numpy==1.26.2 scipy==1.14.1 pandas==2.2.3 tqdm>=4.66.0 transformers==5.17.0 timm psutil}"
     [[ -n "$want" ]] || return 0
     local -a specs
     read -r -a specs <<<"$want"
@@ -76,7 +76,7 @@ ensure_bench_deps() {
         exit 1
     fi
     echo "[model-perf] 实际安装版本:"
-    python -m pip freeze 2>/dev/null | grep -iE '^(numpy|scipy|pandas|tqdm|transformers|timm)=' || true
+    python -m pip freeze 2>/dev/null | grep -iE '^(numpy|scipy|pandas|tqdm|transformers|timm|psutil)=' || true
 }
 ensure_bench_deps
 
