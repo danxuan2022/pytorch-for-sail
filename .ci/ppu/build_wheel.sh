@@ -64,6 +64,7 @@ PPU_LINK_JOBS="${PPU_LINK_JOBS:-2}"
 export CMAKE_JOB_POOLS="compile=${MAX_JOBS};link=${PPU_LINK_JOBS}"
 export CMAKE_JOB_POOL_COMPILE=compile
 export CMAKE_JOB_POOL_LINK=link
+export CMAKE_ARGS="-DCMAKE_JOB_POOLS=compile=${MAX_JOBS};link=${PPU_LINK_JOBS} -DCMAKE_JOB_POOL_COMPILE=compile -DCMAKE_JOB_POOL_LINK=link"
 
 TORCH_VERSION=$(sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+).*/\1/' version.txt)
 echo "[build_wheel] TORCH_VERSION=${TORCH_VERSION} MAX_JOBS=${MAX_JOBS} 链接并发=${PPU_LINK_JOBS} 内存=${MEM_GB}GB"
