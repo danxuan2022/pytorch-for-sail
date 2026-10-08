@@ -68,6 +68,9 @@ export CMAKE_JOB_POOL_LINK=link
 TORCH_VERSION=$(sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+).*/\1/' version.txt)
 echo "[build_wheel] TORCH_VERSION=${TORCH_VERSION} MAX_JOBS=${MAX_JOBS} 链接并发=${PPU_LINK_JOBS} 内存=${MEM_GB}GB"
 
+echo "[build_wheel] 每次编译前清理旧 build 目录"
+rm -rf "$REPO_DIR/build"
+
 BUILD_START=$(date +%s)
 
 env \
