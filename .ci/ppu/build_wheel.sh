@@ -61,8 +61,7 @@ if [[ "${MEM_GB:-0}" -gt 0 ]]; then
 fi
 export MAX_JOBS
 PPU_LINK_JOBS="${PPU_LINK_JOBS:-2}"
-export CMAKE_JOB_POOLS="compile=${MAX_JOBS};link=${PPU_LINK_JOBS}"
-export CMAKE_JOB_POOL_COMPILE=compile
+export CMAKE_JOB_POOLS="link=${PPU_LINK_JOBS}"
 export CMAKE_JOB_POOL_LINK=link
 
 TORCH_VERSION=$(sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+).*/\1/' version.txt)
