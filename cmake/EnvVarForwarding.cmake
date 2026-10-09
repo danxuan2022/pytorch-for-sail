@@ -81,6 +81,11 @@ execute_process(
   OUTPUT_VARIABLE _all_env
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
+# Escape semicolons inside env var values (e.g. CMAKE_JOB_POOLS="compile=8;link=2")
+# before turning newlines into list separators. Otherwise a single variable whose
+# value contains ';' is split across multiple list elements by the IN LISTS loop,
+# dropping everything after the first ';'.
+string(REPLACE ";" "\\;" _all_env "${_all_env}")
 string(REPLACE "\n" ";" _env_lines "${_all_env}")
 foreach(_line IN LISTS _env_lines)
   if(_line MATCHES "^([A-Za-z_0-9]+)=(.*)")
